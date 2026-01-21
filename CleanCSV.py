@@ -1,3 +1,4 @@
+# CleanCSV.py
 from __future__ import annotations
 
 import csv
@@ -21,22 +22,21 @@ app = Flask(__name__)
 WORK_DIR = Path(os.environ.get("CLEANCCSV_WORK_DIR", "/tmp")) / "cleancsv"
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 
-MAX_BYTES = int(os.environ.get("CLEANCCSV_MAX_BYTES", str(20 * 1024 * 1024)))
+MAX_BYTES = int(os.environ.get("CLEANCCSV_MAX_BYTES", str(20 * 1024 * 1024)))  # 20 MB default
 RETENTION_MINUTES = int(os.environ.get("CLEANCCSV_RETENTION_MINUTES", "30"))
 
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "")
 BASE_URL = os.environ.get("APP_BASE_URL", "http://127.0.0.1:5000")
 
-# Webhook signing secret (Stripe Dashboard -> Developers -> Webhooks -> your endpoint)
+# Webhook signing secret from Stripe Dashboard -> Developers -> Webhooks -> endpoint -> Signing secret
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 
 PAYMENTS_ENABLED = bool(stripe.api_key and PRICE_ID)
 
 # ============================
-# HTML (Phase 1 copy included)
+# HTML (Phase 1 + stable UI)
 # ============================
-
 INDEX_HTML = """
 <!doctype html>
 <html>
@@ -207,7 +207,10 @@ RESULT_HTML = """
   {% if near_dupe_examples %}
     <div class="card">
       <p class="section-title"><b>Near-duplicate examples</b></p>
-      <p class="muted compare-note">Each example is shown as two rows in one table. “Kept” is the first occurrence; the other row is {{ "what would be removed" if near_dupes_mode == "preview" else "what was removed" }}.</p>
+      <p class="muted compare-note">
+        Each example is shown as two rows in one table. “Kept” is the first occurrence; the other row is
+        {{ "what would be removed" if near_dupes_mode == "preview" else "what was removed" }}.
+      </p>
 
       {% for ex in near_dupe_examples %}
         <div style="margin-top: 14px;">
@@ -360,6 +363,7 @@ def mark_paid(job_id: str, session_id: str | None = None) -> None:
         m["stripe_session_id"] = session_id
     write_manifest(job_id, m)
 
+
 # ============================
 # Newline normalization
 # ============================
@@ -374,6 +378,7 @@ def normalize_line_endings_to_lf(src: Path, dst: Path) -> tuple[Path, list[str]]
         log.append("Normalized line endings (fixed Windows/Mac-style newlines).")
         return dst, log
     return src, log
+
 
 # ============================
 # Delimiter detection + lenient parsing
@@ -422,6 +427,9 @@ def cleaned_download_name(delim: str) -> str:
 
 
 def read_csv_lenient(path: Path, delimiter: str) -> tuple[pd.DataFrame, list[str], bool, list[int]]:
+    """
+    Pads/truncates rows to match the header length so malformed rows don't crash parsing.
+    """
     import_log: list[str] = []
     rows: list[list[str]] = []
 
@@ -471,6 +479,7 @@ def read_csv_lenient(path: Path, delimiter: str) -> tuple[pd.DataFrame, list[str
 
     df = pd.DataFrame(cleaned_rows[1:], columns=cleaned_rows[0])
     return df, import_log, import_warning, repaired_indices
+
 
 # ============================
 # Cleaning steps (safe)
@@ -549,6 +558,7 @@ def clean_csv(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     df, l = trim_whitespace_df(df); changelog += l
     df, l = remove_duplicates_and_empty_rows(df); changelog += l
     return df, changelog
+
 
 # ============================
 # Near-duplicate analysis (dry-run/remove + examples)
@@ -629,6 +639,31 @@ def render_near_dupe_compare_table(ex: dict, mode: str) -> str:
     df = pd.DataFrame([kept_row, rem_row])
     return df.to_html(index=False, escape=True)
 
+
+# ============================
+# Previews (THIS FIXES build_previews warnings)
+# ============================
+def df_to_html_table(df: pd.DataFrame) -> str:
+    if df is None or df.empty:
+        return "<p class='muted'>No rows to display.</p>"
+    return df.to_html(index=False, escape=True)
+
+
+def build_previews(df: pd.DataFrame, repaired_indices: list[int]) -> tuple[str, str, str]:
+    first_df = df.head(10)
+    last_df = df.tail(10)
+
+    repaired_html = ""
+    if repaired_indices:
+        idx = repaired_indices[:10]
+        idx = [i for i in idx if 0 <= i < len(df)]
+        if idx:
+            repaired_df = df.iloc[idx]
+            repaired_html = df_to_html_table(repaired_df)
+
+    return df_to_html_table(first_df), df_to_html_table(last_df), repaired_html
+
+
 # ============================
 # Routes
 # ============================
@@ -664,7 +699,7 @@ def result(job_id: str):
     near_dupes_mode = (m.get("near_dupes_mode") or "").strip()
     ignored_cols = m.get("ignored_cols", []) or []
     examples_rows = m.get("near_dupe_examples_rows", []) or []
-    near_dupe_examples_tables: list[str] = []
+    near_dupe_examples_tables: List[str] = []
     if near_dupes_mode and examples_rows:
         near_dupe_examples_tables = [render_near_dupe_compare_table(ex, near_dupes_mode) for ex in examples_rows]
 
@@ -724,7 +759,7 @@ def upload():
     # Normalize for parsing
     parse_path, structural_log = normalize_line_endings_to_lf(rp, np)
 
-    # Detect delimiter + parse leniently
+    # Detect delimiter + parse leniently (prevents pandas parser crash)
     delim, delim_log = detect_delimiter(parse_path)
     df, import_log, import_warning, repaired_indices = read_csv_lenient(parse_path, delimiter=delim)
 
@@ -832,13 +867,16 @@ def download(job_id: str):
     if not m or not op.exists():
         abort(404)
 
-    if not PAYMENTS_ENABLED:
-        return send_file(op, as_attachment=True, download_name=cleaned_download_name(m.get("detected_delimiter") or ","))
+    delim = m.get("detected_delimiter") or ","
 
+    if not PAYMENTS_ENABLED:
+        return send_file(op, as_attachment=True, download_name=cleaned_download_name(delim))
+
+    # Pay-to-download gate
     if not m.get("paid"):
         return redirect(f"/pay/{job_id}", code=303)
 
-    return send_file(op, as_attachment=True, download_name=cleaned_download_name(m.get("detected_delimiter") or ","))
+    return send_file(op, as_attachment=True, download_name=cleaned_download_name(delim))
 
 
 @app.get("/pay/<job_id>")
@@ -891,7 +929,7 @@ def cancel():
 
 
 # ============================
-# STRIPE WEBHOOK (NEW)
+# STRIPE WEBHOOK
 # ============================
 @app.post("/stripe/webhook")
 def stripe_webhook():
@@ -899,7 +937,6 @@ def stripe_webhook():
     Stripe sends events here. We verify signature and mark jobs paid on checkout.session.completed.
     """
     if not STRIPE_WEBHOOK_SECRET:
-        # Misconfigured; refuse silently (no secrets leaked)
         return ("Webhook secret not configured", 400)
 
     payload = request.get_data(as_text=False)
@@ -916,7 +953,6 @@ def stripe_webhook():
     except stripe.error.SignatureVerificationError:
         return ("Invalid signature", 400)
 
-    # We care about checkout completion
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
         metadata = session.get("metadata") or {}
@@ -930,4 +966,5 @@ def stripe_webhook():
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    # Local dev only. Render runs gunicorn.
+    app.run(host="127.0.0.1", port=5000, debug=False)
