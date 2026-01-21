@@ -252,7 +252,7 @@ SUCCESS_HTML = """
   <h1>Payment received</h1>
   <p class="muted">You're good to go.</p>
   <p><a class="btn" href="/download/{{ job_id }}">Download cleaned file</a></p>
-  <p class="muted">Need help? Email youremail@example.com and include Job ID: {{ job_id }}</p>
+  <p class="muted">Need help? Email carney.christopher22@gmail.com and include Job ID: {{ job_id }}</p>
 </body>
 </html>
 """
