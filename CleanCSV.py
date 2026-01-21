@@ -5,7 +5,9 @@ import csv
 import json
 import os
 import re
+import time
 import uuid
+from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, List
@@ -25,6 +27,14 @@ WORK_DIR.mkdir(parents=True, exist_ok=True)
 MAX_BYTES = int(os.environ.get("CLEANCCSV_MAX_BYTES", str(20 * 1024 * 1024)))  # 20 MB default
 RETENTION_MINUTES = int(os.environ.get("CLEANCCSV_RETENTION_MINUTES", "30"))
 
+# Abuse / safety limits
+MAX_ROWS = int(os.environ.get("CLEANCCSV_MAX_ROWS", "200000"))  # data rows (not counting header)
+MAX_COLS = int(os.environ.get("CLEANCCSV_MAX_COLS", "300"))
+
+RATE_WINDOW_SECONDS = int(os.environ.get("CLEANCCSV_RATE_WINDOW_SECONDS", "60"))
+RATE_MAX_UPLOADS = int(os.environ.get("CLEANCCSV_RATE_MAX_UPLOADS", "10"))
+
+# Stripe
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "")
 BASE_URL = os.environ.get("APP_BASE_URL", "http://127.0.0.1:5000")
@@ -34,8 +44,10 @@ STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 
 PAYMENTS_ENABLED = bool(stripe.api_key and PRICE_ID)
 
+SUPPORT_EMAIL = "carney.christopher22@gmail.com"
+
 # ============================
-# HTML (Phase 1 + stable UI)
+# HTML (Phase 1 copy included)
 # ============================
 INDEX_HTML = """
 <!doctype html>
@@ -94,6 +106,7 @@ INDEX_HTML = """
     </form>
 
     <p class="muted">Max file size: {{ max_mb }} MB • Files auto-delete after {{ retention }} minutes.</p>
+    <p class="muted">Limits: {{ max_rows }} rows • {{ max_cols }} columns • {{ rate_max }} uploads per {{ rate_window }}s per IP.</p>
     {% if payments_enabled %}
       <p class="muted">Payment: enabled (pay-to-download).</p>
     {% else %}
@@ -241,7 +254,7 @@ RESULT_HTML = """
 </html>
 """
 
-SUCCESS_HTML = """
+SUCCESS_HTML = f"""
 <!doctype html>
 <html>
 <head>
@@ -249,17 +262,17 @@ SUCCESS_HTML = """
   <title>CleanCSV - Payment received</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 40px; max-width: 820px; }
-    .btn { display:inline-block; padding: 10px 14px; border-radius: 10px; border: 1px solid #111; background: #111; color: #fff; text-decoration:none; }
-    .muted { color: #666; font-size: 14px; }
+    body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 40px; max-width: 820px; }}
+    .btn {{ display:inline-block; padding: 10px 14px; border-radius: 10px; border: 1px solid #111; background: #111; color: #fff; text-decoration:none; }}
+    .muted {{ color: #666; font-size: 14px; }}
   </style>
 </head>
 <body>
   <h1>Payment received</h1>
   <p class="muted">You're good to go.</p>
-  <p><a class="btn" href="/download/{{ job_id }}">Download cleaned file</a></p>
-  <p class="muted">Need help? Email youremail@example.com and include Job ID: {{ job_id }}</p>
-  <p class="muted"><a href="/result/{{ job_id }}">Back to results</a></p>
+  <p><a class="btn" href="/download/{{{{ job_id }}}}">Download cleaned file</a></p>
+  <p class="muted">Need help? Email {SUPPORT_EMAIL} and include Job ID: {{{{ job_id }}}}</p>
+  <p class="muted"><a href="/result/{{{{ job_id }}}}">Back to results</a></p>
 </body>
 </html>
 """
@@ -276,7 +289,39 @@ CANCEL_HTML = """
 """
 
 # ============================
-# Helpers
+# Abuse helpers
+# ============================
+_upload_hits = defaultdict(deque)  # ip -> deque[timestamps]
+
+
+def get_client_ip() -> str:
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.remote_addr or "unknown"
+
+
+def rate_limit_check(ip: str) -> bool:
+    now = time.time()
+    q = _upload_hits[ip]
+    while q and (now - q[0]) > RATE_WINDOW_SECONDS:
+        q.popleft()
+    if len(q) >= RATE_MAX_UPLOADS:
+        return False
+    q.append(now)
+    return True
+
+
+def looks_like_text_file(path: Path, sample_bytes: int = 4096) -> bool:
+    try:
+        b = path.read_bytes()[:sample_bytes]
+    except Exception:
+        return False
+    return b"\x00" not in b
+
+
+# ============================
+# File helpers
 # ============================
 def cleanup_old_files() -> None:
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=RETENTION_MINUTES)
@@ -353,14 +398,19 @@ def read_manifest(job_id: str) -> dict[str, Any]:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
-def mark_paid(job_id: str, session_id: str | None = None) -> None:
+def mark_paid(job_id: str, session_id: str | None = None, event_id: str | None = None) -> None:
     m = read_manifest(job_id)
     if not m:
+        return
+    # Idempotency: if already marked paid, no-op.
+    if m.get("paid"):
         return
     m["paid"] = True
     m["paid_at"] = datetime.now(timezone.utc).isoformat()
     if session_id:
         m["stripe_session_id"] = session_id
+    if event_id:
+        m["stripe_event_id"] = event_id
     write_manifest(job_id, m)
 
 
@@ -429,6 +479,7 @@ def cleaned_download_name(delim: str) -> str:
 def read_csv_lenient(path: Path, delimiter: str) -> tuple[pd.DataFrame, list[str], bool, list[int]]:
     """
     Pads/truncates rows to match the header length so malformed rows don't crash parsing.
+    Enforces MAX_ROWS/MAX_COLS.
     """
     import_log: list[str] = []
     rows: list[list[str]] = []
@@ -437,12 +488,18 @@ def read_csv_lenient(path: Path, delimiter: str) -> tuple[pd.DataFrame, list[str
         reader = csv.reader(f, delimiter=delimiter)
         for r in reader:
             rows.append(r)
+            # header + MAX_ROWS data rows
+            if len(rows) > (MAX_ROWS + 1):
+                raise ValueError(f"Too many rows. Limit is {MAX_ROWS:,} data rows.")
 
     if not rows:
         raise ValueError("File appears empty or could not be parsed.")
 
     header = rows[0]
     n = len(header)
+
+    if n > MAX_COLS:
+        raise ValueError(f"Too many columns. Limit is {MAX_COLS:,} columns.")
 
     fixed_too_long = 0
     fixed_too_short = 0
@@ -641,7 +698,7 @@ def render_near_dupe_compare_table(ex: dict, mode: str) -> str:
 
 
 # ============================
-# Previews (THIS FIXES build_previews warnings)
+# Previews
 # ============================
 def df_to_html_table(df: pd.DataFrame) -> str:
     if df is None or df.empty:
@@ -676,6 +733,10 @@ def index():
         max_mb=MAX_BYTES // (1024 * 1024),
         retention=RETENTION_MINUTES,
         payments_enabled=PAYMENTS_ENABLED,
+        max_rows=MAX_ROWS,
+        max_cols=MAX_COLS,
+        rate_window=RATE_WINDOW_SECONDS,
+        rate_max=RATE_MAX_UPLOADS,
     )
 
 
@@ -735,7 +796,26 @@ def upload():
             max_mb=MAX_BYTES // (1024 * 1024),
             retention=RETENTION_MINUTES,
             payments_enabled=PAYMENTS_ENABLED,
+            max_rows=MAX_ROWS,
+            max_cols=MAX_COLS,
+            rate_window=RATE_WINDOW_SECONDS,
+            rate_max=RATE_MAX_UPLOADS,
         ), 413
+
+    # Rate limit per IP
+    ip = get_client_ip()
+    if not rate_limit_check(ip):
+        return render_template_string(
+            INDEX_HTML,
+            error=f"Rate limit: too many uploads. Please wait {RATE_WINDOW_SECONDS} seconds and try again.",
+            max_mb=MAX_BYTES // (1024 * 1024),
+            retention=RETENTION_MINUTES,
+            payments_enabled=PAYMENTS_ENABLED,
+            max_rows=MAX_ROWS,
+            max_cols=MAX_COLS,
+            rate_window=RATE_WINDOW_SECONDS,
+            rate_max=RATE_MAX_UPLOADS,
+        ), 429
 
     f = request.files.get("file")
     if not f or not f.filename:
@@ -756,12 +836,42 @@ def upload():
     # Save raw
     f.save(rp)
 
-    # Normalize for parsing
+    # Reject obvious binary files
+    if not looks_like_text_file(rp):
+        rp.unlink(missing_ok=True)
+        return render_template_string(
+            INDEX_HTML,
+            error="That file doesn't look like a text CSV/TSV (binary data detected).",
+            max_mb=MAX_BYTES // (1024 * 1024),
+            retention=RETENTION_MINUTES,
+            payments_enabled=PAYMENTS_ENABLED,
+            max_rows=MAX_ROWS,
+            max_cols=MAX_COLS,
+            rate_window=RATE_WINDOW_SECONDS,
+            rate_max=RATE_MAX_UPLOADS,
+        ), 400
+
+    # Normalize newlines for parsing
     parse_path, structural_log = normalize_line_endings_to_lf(rp, np)
 
-    # Detect delimiter + parse leniently (prevents pandas parser crash)
+    # Detect delimiter + parse leniently with limits
     delim, delim_log = detect_delimiter(parse_path)
-    df, import_log, import_warning, repaired_indices = read_csv_lenient(parse_path, delimiter=delim)
+    try:
+        df, import_log, import_warning, repaired_indices = read_csv_lenient(parse_path, delimiter=delim)
+    except ValueError as e:
+        rp.unlink(missing_ok=True)
+        np.unlink(missing_ok=True)
+        return render_template_string(
+            INDEX_HTML,
+            error=str(e),
+            max_mb=MAX_BYTES // (1024 * 1024),
+            retention=RETENTION_MINUTES,
+            payments_enabled=PAYMENTS_ENABLED,
+            max_rows=MAX_ROWS,
+            max_cols=MAX_COLS,
+            rate_window=RATE_WINDOW_SECONDS,
+            rate_max=RATE_MAX_UPLOADS,
+        ), 400
 
     # Clean
     df2, clean_log = clean_csv(df)
@@ -872,7 +982,6 @@ def download(job_id: str):
     if not PAYMENTS_ENABLED:
         return send_file(op, as_attachment=True, download_name=cleaned_download_name(delim))
 
-    # Pay-to-download gate
     if not m.get("paid"):
         return redirect(f"/pay/{job_id}", code=303)
 
@@ -933,9 +1042,6 @@ def cancel():
 # ============================
 @app.post("/stripe/webhook")
 def stripe_webhook():
-    """
-    Stripe sends events here. We verify signature and mark jobs paid on checkout.session.completed.
-    """
     if not STRIPE_WEBHOOK_SECRET:
         return ("Webhook secret not configured", 400)
 
@@ -953,6 +1059,9 @@ def stripe_webhook():
     except stripe.error.SignatureVerificationError:
         return ("Invalid signature", 400)
 
+    # Idempotency: ignore already-processed events
+    event_id = event.get("id")
+
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
         metadata = session.get("metadata") or {}
@@ -960,7 +1069,11 @@ def stripe_webhook():
         session_id = session.get("id")
 
         if job_id:
-            mark_paid(job_id, session_id=session_id)
+            # If we already saved this event id, no-op (best effort)
+            m = read_manifest(job_id)
+            if m.get("stripe_event_id") == event_id:
+                return ("ok", 200)
+            mark_paid(job_id, session_id=session_id, event_id=event_id)
 
     return ("ok", 200)
 
