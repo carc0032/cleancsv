@@ -1,4 +1,3 @@
-# CleanCSV.py
 from __future__ import annotations
 
 import csv
@@ -8,7 +7,7 @@ import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, List, Tuple
+from typing import Any, List
 
 import pandas as pd
 import stripe
@@ -28,6 +27,10 @@ RETENTION_MINUTES = int(os.environ.get("CLEANCCSV_RETENTION_MINUTES", "30"))
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "")
 BASE_URL = os.environ.get("APP_BASE_URL", "http://127.0.0.1:5000")
+
+# Webhook signing secret (Stripe Dashboard -> Developers -> Webhooks -> your endpoint)
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+
 PAYMENTS_ENABLED = bool(stripe.api_key and PRICE_ID)
 
 # ============================
@@ -122,7 +125,6 @@ RESULT_HTML = """
     .chip { display:inline-block; padding:4px 10px; border:1px solid #ddd; border-radius:999px; font-size:12px; margin: 4px 6px 0 0; }
     .chips { margin-top: 6px; }
 
-    /* Table containment */
     .table-wrap {
       overflow-x: auto;
       width: 100%;
@@ -194,6 +196,7 @@ RESULT_HTML = """
         {% endif %}
       </a>
       <a class="btn secondary" href="/download_original/{{ job_id }}">Download original</a>
+      <a class="btn secondary" href="/result/{{ job_id }}">Results link</a>
     </p>
 
     <p class="muted">
@@ -252,7 +255,8 @@ SUCCESS_HTML = """
   <h1>Payment received</h1>
   <p class="muted">You're good to go.</p>
   <p><a class="btn" href="/download/{{ job_id }}">Download cleaned file</a></p>
-  <p class="muted">Need help? Email carney.christopher22@gmail.com and include Job ID: {{ job_id }}</p>
+  <p class="muted">Need help? Email youremail@example.com and include Job ID: {{ job_id }}</p>
+  <p class="muted"><a href="/result/{{ job_id }}">Back to results</a></p>
 </body>
 </html>
 """
@@ -320,6 +324,7 @@ def write_manifest(job_id: str, data: dict[str, Any]) -> None:
         "created_at": datetime.now(timezone.utc).isoformat(),
         "paid": False,
         "paid_at": None,
+        "stripe_session_id": None,
         "rows": None,
         "cols": None,
         "changelog": [],
@@ -356,7 +361,7 @@ def mark_paid(job_id: str, session_id: str | None = None) -> None:
     write_manifest(job_id, m)
 
 # ============================
-# Newline normalization (safe)
+# Newline normalization
 # ============================
 def normalize_line_endings_to_lf(src: Path, dst: Path) -> tuple[Path, list[str]]:
     log: list[str] = []
@@ -417,9 +422,6 @@ def cleaned_download_name(delim: str) -> str:
 
 
 def read_csv_lenient(path: Path, delimiter: str) -> tuple[pd.DataFrame, list[str], bool, list[int]]:
-    """
-    Pads/truncates rows to match the header length so malformed rows don't crash parsing.
-    """
     import_log: list[str] = []
     rows: list[list[str]] = []
 
@@ -471,7 +473,7 @@ def read_csv_lenient(path: Path, delimiter: str) -> tuple[pd.DataFrame, list[str
     return df, import_log, import_warning, repaired_indices
 
 # ============================
-# Cleaning steps (minimal/safe)
+# Cleaning steps (safe)
 # ============================
 def snake_case(name: str) -> str:
     s = str(name).strip().lower()
@@ -507,7 +509,6 @@ def trim_whitespace_df(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     log: list[str] = []
     changed_total = 0
     text_cols = 0
-
     for col in df.columns:
         s = df[col]
         if s.dtype == object or pd.api.types.is_string_dtype(s):
@@ -524,7 +525,6 @@ def trim_whitespace_df(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
         log.append("No whitespace issues found in text cells.")
     else:
         log.append(f"Trimmed whitespace in {changed_total:,} text cells (prevents grouping/matching issues).")
-
     return df, log
 
 
@@ -545,9 +545,9 @@ def remove_duplicates_and_empty_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, li
 
 def clean_csv(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     changelog: list[str] = []
-    df, log = normalize_columns(df); changelog += log
-    df, log = trim_whitespace_df(df); changelog += log
-    df, log = remove_duplicates_and_empty_rows(df); changelog += log
+    df, l = normalize_columns(df); changelog += l
+    df, l = trim_whitespace_df(df); changelog += l
+    df, l = remove_duplicates_and_empty_rows(df); changelog += l
     return df, changelog
 
 # ============================
@@ -630,29 +630,6 @@ def render_near_dupe_compare_table(ex: dict, mode: str) -> str:
     return df.to_html(index=False, escape=True)
 
 # ============================
-# Previews
-# ============================
-def df_to_html_table(df: pd.DataFrame) -> str:
-    if df is None or df.empty:
-        return "<p class='muted'>No rows to display.</p>"
-    return df.to_html(index=False, escape=True)
-
-
-def build_previews(df: pd.DataFrame, repaired_indices: list[int]) -> tuple[str, str, str]:
-    first_df = df.head(10)
-    last_df = df.tail(10)
-
-    repaired_html = ""
-    if repaired_indices:
-        idx = repaired_indices[:10]
-        idx = [i for i in idx if 0 <= i < len(df)]
-        if idx:
-            repaired_df = df.iloc[idx]
-            repaired_html = df_to_html_table(repaired_df)
-
-    return df_to_html_table(first_df), df_to_html_table(last_df), repaired_html
-
-# ============================
 # Routes
 # ============================
 @app.get("/")
@@ -664,126 +641,6 @@ def index():
         max_mb=MAX_BYTES // (1024 * 1024),
         retention=RETENTION_MINUTES,
         payments_enabled=PAYMENTS_ENABLED,
-    )
-
-
-@app.post("/upload")
-def upload():
-    cleanup_old_files()
-
-    if bytes_too_large(request):
-        return render_template_string(
-            INDEX_HTML,
-            error=f"File too large. Max is {MAX_BYTES // (1024 * 1024)} MB.",
-            max_mb=MAX_BYTES // (1024 * 1024),
-            retention=RETENTION_MINUTES,
-            payments_enabled=PAYMENTS_ENABLED,
-        ), 413
-
-    f = request.files.get("file")
-    if not f or not f.filename:
-        abort(400)
-
-    original_filename = f.filename
-
-    near_preview = bool(request.form.get("near_dupes_preview"))
-    near_remove = bool(request.form.get("near_dupes_remove"))
-    if near_remove:
-        near_preview = True
-
-    job_id = uuid.uuid4().hex
-    rp = raw_path(job_id)
-    np = norm_path(job_id)
-    op = out_path(job_id)
-
-    # Save raw
-    f.save(rp)
-
-    # Normalize newlines to parseable file
-    parse_path, structural_log = normalize_line_endings_to_lf(rp, np)
-
-    # Detect delimiter and parse leniently
-    delim, delim_log = detect_delimiter(parse_path)
-    df, import_log, import_warning, repaired_indices = read_csv_lenient(parse_path, delimiter=delim)
-
-    # Clean
-    df2, clean_log = clean_csv(df)
-    changelog = structural_log + delim_log + import_log + clean_log
-
-    near_dupes_mode = ""
-    ignored_cols: list[str] = []
-    near_dupes_count = 0
-    near_dupe_examples_rows: list[dict] = []
-    near_dupe_examples_tables: list[str] = []
-
-    if near_preview:
-        ignored_cols, near_dupes_count, near_dupe_examples_rows, dup_mask = analyze_near_duplicates(df2, max_examples=5)
-        if near_dupes_count == 0:
-            near_dupes_mode = "remove" if near_remove else "preview"
-            changelog.append("No near-duplicate rows found (using the near-duplicate rules).")
-        else:
-            if near_remove:
-                df2 = df2.loc[~dup_mask].copy()
-                near_dupes_mode = "remove"
-                changelog.append(f"Removed {near_dupes_count:,} near-duplicate rows.")
-            else:
-                near_dupes_mode = "preview"
-                changelog.append(f"Dry run: {near_dupes_count:,} near-duplicate rows would be removed.")
-
-        changelog.append(
-            "Near-duplicate rule: compare all columns except "
-            + (", ".join(ignored_cols) if ignored_cols else "(none)")
-            + "."
-        )
-        near_dupe_examples_tables = [render_near_dupe_compare_table(ex, near_dupes_mode) for ex in near_dupe_examples_rows]
-
-    # Write output with same delimiter
-    df2.to_csv(op, index=False, encoding="utf-8", lineterminator="\n", sep=delim)
-    changelog.append(f"Wrote output as UTF-8 with standard newlines using delimiter {repr(delim)}.")
-
-    # Delete normalized file
-    np.unlink(missing_ok=True)
-
-    rows, cols = int(df2.shape[0]), int(df2.shape[1])
-    preview_first, preview_last, preview_repaired = build_previews(df2, repaired_indices)
-
-    write_manifest(
-        job_id,
-        {
-            "paid": False,
-            "rows": rows,
-            "cols": cols,
-            "changelog": changelog,
-            "import_warning": import_warning,
-            "repaired_row_indices": repaired_indices,
-            "near_dupes_mode": near_dupes_mode,
-            "ignored_cols": ignored_cols,
-            "near_dupes_count": near_dupes_count,
-            "near_dupe_examples_rows": near_dupe_examples_rows,
-            "detected_delimiter": delim,
-            "original_file": rp.name,
-            "original_filename": original_filename or "original.csv",
-        },
-    )
-
-    return render_template_string(
-        RESULT_HTML,
-        job_id=job_id,
-        rows=rows,
-        cols=cols,
-        changelog=changelog,
-        import_warning=import_warning,
-        near_dupes_mode=near_dupes_mode,
-        ignored_cols=ignored_cols,
-        near_dupe_examples=near_dupe_examples_tables,
-        preview_first=preview_first,
-        preview_last=preview_last,
-        preview_repaired=preview_repaired,
-        retention=RETENTION_MINUTES,
-        paid=False,
-        payments_enabled=PAYMENTS_ENABLED,
-        detected_delimiter=delim,
-        detected_delimiter_label=delimiter_label(delim),
     )
 
 
@@ -826,6 +683,127 @@ def result(job_id: str):
         preview_repaired=preview_repaired,
         retention=RETENTION_MINUTES,
         paid=bool(m.get("paid")),
+        payments_enabled=PAYMENTS_ENABLED,
+        detected_delimiter=delim,
+        detected_delimiter_label=delimiter_label(delim),
+    )
+
+
+@app.post("/upload")
+def upload():
+    cleanup_old_files()
+
+    if bytes_too_large(request):
+        return render_template_string(
+            INDEX_HTML,
+            error=f"File too large. Max is {MAX_BYTES // (1024 * 1024)} MB.",
+            max_mb=MAX_BYTES // (1024 * 1024),
+            retention=RETENTION_MINUTES,
+            payments_enabled=PAYMENTS_ENABLED,
+        ), 413
+
+    f = request.files.get("file")
+    if not f or not f.filename:
+        abort(400)
+
+    original_filename = f.filename
+
+    near_preview = bool(request.form.get("near_dupes_preview"))
+    near_remove = bool(request.form.get("near_dupes_remove"))
+    if near_remove:
+        near_preview = True
+
+    job_id = uuid.uuid4().hex
+    rp = raw_path(job_id)
+    np = norm_path(job_id)
+    op = out_path(job_id)
+
+    # Save raw
+    f.save(rp)
+
+    # Normalize for parsing
+    parse_path, structural_log = normalize_line_endings_to_lf(rp, np)
+
+    # Detect delimiter + parse leniently
+    delim, delim_log = detect_delimiter(parse_path)
+    df, import_log, import_warning, repaired_indices = read_csv_lenient(parse_path, delimiter=delim)
+
+    # Clean
+    df2, clean_log = clean_csv(df)
+    changelog = structural_log + delim_log + import_log + clean_log
+
+    near_dupes_mode = ""
+    ignored_cols: list[str] = []
+    near_dupes_count = 0
+    near_dupe_examples_rows: list[dict] = []
+    near_dupe_examples_tables: list[str] = []
+
+    if near_preview:
+        ignored_cols, near_dupes_count, near_dupe_examples_rows, dup_mask = analyze_near_duplicates(df2, max_examples=5)
+
+        if near_dupes_count == 0:
+            near_dupes_mode = "remove" if near_remove else "preview"
+            changelog.append("No near-duplicate rows found (using the near-duplicate rules).")
+        else:
+            if near_remove:
+                df2 = df2.loc[~dup_mask].copy()
+                near_dupes_mode = "remove"
+                changelog.append(f"Removed {near_dupes_count:,} near-duplicate rows.")
+            else:
+                near_dupes_mode = "preview"
+                changelog.append(f"Dry run: {near_dupes_count:,} near-duplicate rows would be removed.")
+
+        changelog.append(
+            "Near-duplicate rule: compare all columns except "
+            + (", ".join(ignored_cols) if ignored_cols else "(none)")
+            + "."
+        )
+        near_dupe_examples_tables = [render_near_dupe_compare_table(ex, near_dupes_mode) for ex in near_dupe_examples_rows]
+
+    # Write output with same delimiter
+    df2.to_csv(op, index=False, encoding="utf-8", lineterminator="\n", sep=delim)
+    changelog.append(f"Wrote output as UTF-8 with standard newlines using delimiter {repr(delim)}.")
+
+    # Delete normalized parse file
+    np.unlink(missing_ok=True)
+
+    rows, cols = int(df2.shape[0]), int(df2.shape[1])
+    preview_first, preview_last, preview_repaired = build_previews(df2, repaired_indices)
+
+    write_manifest(
+        job_id,
+        {
+            "paid": False,
+            "rows": rows,
+            "cols": cols,
+            "changelog": changelog,
+            "import_warning": import_warning,
+            "repaired_row_indices": repaired_indices,
+            "near_dupes_mode": near_dupes_mode,
+            "ignored_cols": ignored_cols,
+            "near_dupes_count": near_dupes_count,
+            "near_dupe_examples_rows": near_dupe_examples_rows,
+            "detected_delimiter": delim,
+            "original_file": rp.name,
+            "original_filename": original_filename or "original.csv",
+        },
+    )
+
+    return render_template_string(
+        RESULT_HTML,
+        job_id=job_id,
+        rows=rows,
+        cols=cols,
+        changelog=changelog,
+        import_warning=import_warning,
+        near_dupes_mode=near_dupes_mode,
+        ignored_cols=ignored_cols,
+        near_dupe_examples=near_dupe_examples_tables,
+        preview_first=preview_first,
+        preview_last=preview_last,
+        preview_repaired=preview_repaired,
+        retention=RETENTION_MINUTES,
+        paid=False,
         payments_enabled=PAYMENTS_ENABLED,
         detected_delimiter=delim,
         detected_delimiter_label=delimiter_label(delim),
@@ -897,6 +875,7 @@ def success():
     if not job_id or not session_id:
         abort(400)
 
+    # Convenience confirmation; webhook is the source of truth once enabled.
     sess = stripe.checkout.Session.retrieve(session_id)
     if sess.payment_status == "paid" and (sess.metadata or {}).get("job_id") == job_id:
         mark_paid(job_id, session_id=session_id)
@@ -909,6 +888,45 @@ def success():
 def cancel():
     job_id = (request.args.get("job_id") or "").strip()
     return render_template_string(CANCEL_HTML, job_id=job_id)
+
+
+# ============================
+# STRIPE WEBHOOK (NEW)
+# ============================
+@app.post("/stripe/webhook")
+def stripe_webhook():
+    """
+    Stripe sends events here. We verify signature and mark jobs paid on checkout.session.completed.
+    """
+    if not STRIPE_WEBHOOK_SECRET:
+        # Misconfigured; refuse silently (no secrets leaked)
+        return ("Webhook secret not configured", 400)
+
+    payload = request.get_data(as_text=False)
+    sig_header = request.headers.get("Stripe-Signature", "")
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload=payload,
+            sig_header=sig_header,
+            secret=STRIPE_WEBHOOK_SECRET,
+        )
+    except ValueError:
+        return ("Invalid payload", 400)
+    except stripe.error.SignatureVerificationError:
+        return ("Invalid signature", 400)
+
+    # We care about checkout completion
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+        metadata = session.get("metadata") or {}
+        job_id = metadata.get("job_id")
+        session_id = session.get("id")
+
+        if job_id:
+            mark_paid(job_id, session_id=session_id)
+
+    return ("ok", 200)
 
 
 if __name__ == "__main__":
