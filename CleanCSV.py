@@ -123,6 +123,8 @@ INDEX_HTML = """
         <p class="sub">
           Upload your file → see what was repaired → download a clean version.
           Built for messy exports: extra columns, missing fields, weird delimiters, embedded newlines.
+          <br />
+          <b>Handles European CSVs automatically (semicolon delimiters, decimal commas, localized number formats).</b>
         </p>
         <ul class="bullets">
           <li><b>Repairs inconsistent rows</b> (extra/missing columns) and keeps the file importable.</li>
@@ -144,13 +146,22 @@ INDEX_HTML = """
             <div class="help">Shows examples and how many rows would be removed, but does not delete anything.</div>
           </div>
 
-          <div class="opt">
+                    <div class="opt">
             <label>
               <input type="checkbox" name="near_dupes_remove" value="1" />
               <b>Remove</b> near-duplicates
             </label>
             <div class="help">Removes rows that match after ignoring ID/date/balance-style columns.</div>
           </div>
+
+          <div class="opt">
+            <label>
+              <input type="checkbox" name="normalize_numbers" value="1" />
+              <b>Normalize numbers</b> (optional)
+            </label>
+            <div class="help">Converts values like 1.234,56 → 1234.56 and (5,00) → -5.00 where safe.</div>
+          </div>
+        
 
           <div class="row">
             <button class="btn" type="submit">Upload & preview</button>
@@ -232,7 +243,13 @@ RESULT_HTML = """
       {% if near_dupes_mode %}<span class="pill">Near-dupes: {{ near_dupes_mode }}</span>{% endif %}
       {% if detected_delimiter %}<span class="pill">Delimiter: {{ detected_delimiter_label }}</span>{% endif %}
     </p>
-
+    
+    <p class="muted" style="margin:0 0 12px;">
+      <span class="pill">Encoding: {{ encoding_label }}</span>
+      <span class="pill">Numbers: {{ numbers_label }}</span>
+      <span class="pill">Header: {{ header_label }}</span>
+    </p>
+    
     <div class="card">
       <p style="margin:0;"><b>Rows:</b> {{ rows }} &nbsp; <b>Columns:</b> {{ cols }}</p>
 
@@ -660,10 +677,223 @@ def read_csv_lenient(path: Path, delimiter: str) -> tuple[pd.DataFrame, list[str
     df = pd.DataFrame(cleaned_rows[1:], columns=cleaned_rows[0])
     return df, import_log, import_warning, repaired_indices
 
+def detect_and_strip_preamble(parse_path: Path, delimiter: str, max_scan_lines: int = 60) -> tuple[Path, list[str]]:
+    """
+    Heuristic header detection:
+    - Look at first N lines
+    - Score each line as a candidate header
+    - If a later line looks like the true header, drop preamble lines above it
+    Writes back to parse_path (UTF-8) and returns (parse_path, changelog_lines).
+    """
+    log: list[str] = []
+
+    lines = parse_path.read_text(encoding="utf-8").splitlines()
+    if not lines:
+        return parse_path, log
+
+    scan = lines[: max_scan_lines]
+    # Ignore completely empty lines but keep their indices
+    candidates = [(i, ln) for i, ln in enumerate(scan) if ln.strip()]
+
+    if len(candidates) < 2:
+        return parse_path, log
+
+    def score_header_line(line: str) -> float:
+        # Split by delimiter (not full CSV parsing; just a heuristic)
+        parts = [p.strip() for p in line.split(delimiter)]
+        n = len(parts)
+
+        if n < 2:
+            return -1.0
+
+        # Penalize lines that look like titles (single long field)
+        # Reward lines with many columns, mostly "name-like" tokens, and uniqueness
+        alpha_tokens = sum(1 for p in parts if p and re.search(r"[A-Za-z]", p))
+        numeric_tokens = sum(1 for p in parts if p and re.fullmatch(r"[-+]?(\d+(\.\d+)?)", p))
+        empty_tokens = sum(1 for p in parts if not p)
+
+        uniq_ratio = len(set(parts)) / max(1, n)
+
+        # header-ish: more alpha than numeric, few empties, decent uniqueness, and more columns
+        score = 0.0
+        score += min(10.0, n) * 1.2
+        score += (alpha_tokens / n) * 3.0
+        score -= (numeric_tokens / n) * 2.0
+        score -= (empty_tokens / n) * 2.5
+        score += uniq_ratio * 1.0
+
+        # Downrank lines that contain ':' heavily (often "Report: ...")
+        if ":" in line and n <= 2:
+            score -= 3.0
+
+        return score
+
+    scored = [(i, score_header_line(ln)) for i, ln in candidates]
+    scored.sort(key=lambda t: t[1], reverse=True)
+
+    best_i, best_score = scored[0]
+    if best_score < 2.5:
+        # not confident enough to strip
+        return parse_path, log
+
+    # Only strip if header is not already at top and we are confident
+    if best_i > 0:
+        dropped = best_i
+        new_lines = lines[best_i:]  # keep from header onward
+        # Also drop any leading empty lines after header selection
+        while new_lines and not new_lines[0].strip():
+            new_lines = new_lines[1:]
+            dropped += 1
+
+        parse_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8", newline="\n")
+        log.append(f"Header detected on line {best_i+1}; removed {dropped} preamble line(s).")
+    else:
+        log.append("Header appears to be on the first line (no preamble removed).")
+
+    return parse_path, log
+
+def guess_delimiter_euro_aware(path: Path, candidates: list[str] | None = None) -> tuple[str, list[str]]:
+    """
+    Improved delimiter detection:
+    - Uses csv.Sniffer when possible
+    - If ambiguous, uses heuristics + 'decimal comma' detection:
+        if semicolon looks consistent AND many fields look like '12,34' numbers,
+        prefer ';' over ','.
+    Returns (delimiter, log_lines)
+    """
+    log: list[str] = []
+    if candidates is None:
+        candidates = [",", ";", "\t", "|"]
+
+    sample = path.read_text(encoding="utf-8")[:16384]
+    lines = [ln for ln in sample.splitlines() if ln.strip()][:30]
+    sniff_sample = "\n".join(lines)
+
+    # 1) Try Sniffer first
+    try:
+        dialect = csv.Sniffer().sniff(sniff_sample, delimiters=candidates)
+        d = dialect.delimiter
+        if d in candidates:
+            log.append(f"Detected delimiter: {repr(d)} (sniffer).")
+            return d, log
+    except Exception:
+        pass
+
+    # Helper: measure how consistent delimiter count is across lines
+    def consistency_score(delim: str) -> float:
+        counts = [ln.count(delim) for ln in lines]
+        if not counts:
+            return -1.0
+        avg = sum(counts) / len(counts)
+        var = sum((c - avg) ** 2 for c in counts) / len(counts)
+        # prefer more separators, but penalize inconsistency
+        return avg - (var ** 0.5)
+
+    # Helper: detect decimal-comma numbers in tokens
+    # Examples: 12,34  1.234,56  -12,34  (12,34)
+    dec_comma_re = re.compile(r"^\(?-?\d{1,3}([.\s]\d{3})*,\d+\)?$")
+
+    def decimal_comma_density(delim: str) -> float:
+        tokens = []
+        for ln in lines:
+            parts = [p.strip().strip('"') for p in ln.split(delim)]
+            tokens.extend(parts)
+        if not tokens:
+            return 0.0
+        matches = sum(1 for t in tokens if dec_comma_re.match(t))
+        return matches / len(tokens)
+
+    scores = {d: consistency_score(d) for d in candidates}
+    best = max(scores, key=scores.get)
+
+    # 2) Euro-aware tie breaker between ',' and ';'
+    # If ';' is close to ',' and decimal-comma tokens are common, prefer ';'
+    if "," in scores and ";" in scores:
+        euro_density_comma_split = decimal_comma_density(";")  # tokenizing by ';' shows decimal commas inside fields
+        close = abs(scores[";"] - scores[","]) <= 0.35  # heuristic closeness threshold
+        if close and euro_density_comma_split >= 0.06:  # 6%+ of tokens look like decimal-comma numbers
+            log.append(f"Detected delimiter: ';' (euro-aware: decimal comma density {euro_density_comma_split:.1%}).")
+            return ";", log
+
+    log.append(f"Detected delimiter: {repr(best)} (heuristic).")
+    return best, log
 
 # ============================
 # Cleaning
 # ============================
+
+def normalize_numeric_strings_df(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Convert common money/number formats to numeric:
+    - European: 1.234,56 -> 1234.56
+    - US: 1,234.56 -> 1234.56
+    - Parentheses negatives: (12,34) -> -12.34
+    Only converts a column if conversion succeeds for most non-empty values.
+    """
+    log: list[str] = []
+    converted_cols = 0
+
+    euro_re = re.compile(r"^\(?-?\d{1,3}([.\s]\d{3})*,\d+\)?$")      # 1.234,56 / 1 234,56
+    us_re   = re.compile(r"^\(?-?\d{1,3}(,\d{3})*(\.\d+)?\)?$")      # 1,234.56
+
+    def to_float_safe(s: str) -> float | None:
+        if s is None:
+            return None
+        t = str(s).strip()
+        if not t:
+            return None
+
+        neg = False
+        if t.startswith("(") and t.endswith(")"):
+            neg = True
+            t = t[1:-1].strip()
+
+        # remove currency symbols and spaces around
+        t = t.replace("$", "").replace("€", "").replace("£", "").strip()
+
+        # Euro style: thousands '.' or space, decimal ','
+        if euro_re.match(t):
+            t = t.replace(" ", "")
+            t = t.replace(".", "")
+            t = t.replace(",", ".")
+        # US style: thousands ',', decimal '.'
+        elif us_re.match(t):
+            t = t.replace(",", "")
+        else:
+            return None
+
+        try:
+            v = float(t)
+            return -v if neg else v
+        except Exception:
+            return None
+
+    for col in df.columns:
+        s = df[col]
+        if not (s.dtype == object or pd.api.types.is_string_dtype(s)):
+            continue
+
+        non_empty = s.dropna().map(lambda x: str(x).strip()).loc[lambda x: x != ""]
+        if non_empty.empty:
+            continue
+
+        conv = non_empty.map(to_float_safe)
+        success = conv.notna().mean()
+
+        # Only convert if we are pretty confident this is a numeric column
+        if success >= 0.85 and len(non_empty) >= 5:
+            # Convert whole column (preserve blanks)
+            new_col = s.map(lambda x: to_float_safe(x) if str(x).strip() != "" else None)
+            df[col] = pd.to_numeric(new_col, errors="coerce")
+            converted_cols += 1
+
+    if converted_cols:
+        log.append(f"Normalized numeric formats in {converted_cols} column(s) (EU/US separators, parentheses negatives).")
+    else:
+        log.append("Numeric normalization: no eligible numeric columns detected.")
+    return df, log
+
+
 def snake_case(name: str) -> str:
     s = str(name).strip().lower()
     s = re.sub(r"[^\w\s]", "", s)
@@ -860,6 +1090,11 @@ def is_payment_pending(m: dict) -> bool:
 # ============================
 # Routes
 # ============================
+
+@app.get("/favicon.ico")
+def favicon():
+    return ("", 204)
+
 @app.get("/")
 def index():
     cleanup_old_files()
@@ -930,7 +1165,9 @@ def upload():
     near_remove = bool(request.form.get("near_dupes_remove"))
     if near_remove:
         near_preview = True
-
+        
+    normalize_numbers = bool(request.form.get("normalize_numbers"))
+    
     job_id = uuid.uuid4().hex
     rp = raw_path(job_id)
     np = norm_path(job_id)
@@ -943,6 +1180,7 @@ def upload():
         file_bytes=request.content_length,
         near_preview=near_preview,
         near_remove=near_remove,
+        normalize_numbers=normalize_numbers,
     )
 
     f.save(rp)
@@ -966,7 +1204,9 @@ def upload():
     log_event("upload_decoded", job_id=job_id, encoding=encoding_used, **stitch_stats)
 
     # Detect delimiter on UTF-8 normalized file
-    delim, delim_log = detect_delimiter(parse_path)
+    delim, delim_log = guess_delimiter_euro_aware(parse_path)
+    parse_path, header_log = detect_and_strip_preamble(parse_path, delim)
+    log_event("header_detection", job_id=job_id, note="; ".join(header_log) if header_log else "")
 
     # Lenient parse (pads/truncates rows)
     try:
@@ -988,7 +1228,13 @@ def upload():
 
     # Clean
     df2, clean_log = clean_csv(df)
-    changelog = structural_log + delim_log + import_log + clean_log
+    
+    if normalize_numbers:
+        df2, num_log = normalize_numeric_strings_df(df2)
+        clean_log += num_log
+        log_event("numeric_normalization", job_id=job_id, notes=num_log)
+    
+    changelog = structural_log + delim_log + header_log + import_log + clean_log
 
     # Near-dupes (optional)
     near_dupes_mode = ""
@@ -1082,6 +1328,11 @@ def result(job_id: str):
         abort(404)
 
     delim = m.get("detected_delimiter") or ","
+
+    # Detected formats (for badges)
+    encoding_label = "UTF-8"  # because we normalize to UTF-8 in the pipeline
+    numbers_label = "Normalized" if any("Normalized numeric formats" in c for c in m.get("changelog", [])) else "Unchanged"
+    header_label = "Auto-detected" if any("Header detected" in c for c in m.get("changelog", [])) else "First row"
     try:
         df = pd.read_csv(op, encoding="utf-8", sep=delim)
     except Exception:
@@ -1117,6 +1368,9 @@ def result(job_id: str):
         payments_enabled=PAYMENTS_ENABLED,
         detected_delimiter=delim,
         detected_delimiter_label=delimiter_label(delim),
+        encoding_label=encoding_label,
+        numbers_label=numbers_label,
+        header_label=header_label,
         payment_pending=payment_pending,
         support_email=SUPPORT_EMAIL,
     )
