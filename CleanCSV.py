@@ -718,7 +718,52 @@ def clean_csv(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     df, l = trim_whitespace_df(df); changelog += l
     df, l = remove_duplicates_and_empty_rows(df); changelog += l
     return df, changelog
+def _should_ignore_col(col: str) -> bool:
+    s = str(col).lower().strip()
+    if s == "id" or s.endswith("_id") or s.startswith("id_") or "_id_" in s:
+        return True
+    if "uuid" in s or "guid" in s:
+        return True
+    if "transaction" in s or "txn" in s:
+        return True
+    if "reference" in s or s in {"ref", "reference"} or "ref_" in s or s.endswith("_ref"):
+        return True
+    if "date" in s or "time" in s or "timestamp" in s or s.endswith("_at"):
+        return True
+    if "balance" in s or "running_total" in s or "remaining" in s:
+        return True
+    return False
 
+
+def _normalize_text_for_compare(x: Any) -> str:
+    if x is None:
+        return ""
+    s = str(x)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip().lower()
+
+
+def _row_to_dict(df: pd.DataFrame, idx: int) -> dict:
+    row = df.iloc[idx].to_dict()
+    return {k: _json_safe(v) for k, v in row.items()}
+
+
+def render_near_dupe_compare_table(ex: dict, mode: str) -> str:
+    removed_label = "Would remove" if mode == "preview" else "Removed"
+
+    kept = dict(ex["kept"])
+    removed = dict(ex["removed"])
+
+    cols = list(kept.keys())
+    for k in removed.keys():
+        if k not in cols:
+            cols.append(k)
+
+    kept_row = {"status": "Kept", **{k: kept.get(k) for k in cols}}
+    rem_row = {"status": removed_label, **{k: removed.get(k) for k in cols}}
+
+    df = pd.DataFrame([kept_row, rem_row])
+    return df.to_html(index=False, escape=True)
 
 # ============================
 # Near-duplicate helpers
@@ -880,7 +925,66 @@ def success():
 
     log_event("success_not_confirmed", job_id=job_id, stripe_session_id=session_id, payment_status=getattr(sess, "payment_status", None))
     return "Payment not confirmed.", 402
+@app.get("/result/<job_id>")
+def result(job_id: str):
+    cleanup_old_files()
 
+    m = read_manifest(job_id)
+    op = out_path(job_id)
+    if not m or not op.exists():
+        log_event("result_not_found", job_id=job_id)
+        abort(404)
+
+    delim = m.get("detected_delimiter") or ","
+    try:
+        df = pd.read_csv(op, encoding="utf-8", sep=delim)
+    except Exception as e:
+        log_event("result_read_error", job_id=job_id, error=str(e))
+        df = pd.DataFrame()
+
+    repaired_indices = m.get("repaired_row_indices", []) or []
+    preview_first, preview_last, preview_repaired = build_previews(df, repaired_indices)
+
+    near_dupes_mode = (m.get("near_dupes_mode") or "").strip()
+    ignored_cols = m.get("ignored_cols", []) or []
+    examples_rows = m.get("near_dupe_examples_rows", []) or []
+    near_dupe_examples_tables: List[str] = []
+    if near_dupes_mode and examples_rows:
+        near_dupe_examples_tables = [render_near_dupe_compare_table(ex, near_dupes_mode) for ex in examples_rows]
+
+    payment_pending = is_payment_pending(m)  # if you named this differently, use your pending check
+
+    log_event(
+        "result_view",
+        job_id=job_id,
+        paid=bool(m.get("paid")),
+        payment_pending=payment_pending,
+        rows=m.get("rows"),
+        cols=m.get("cols"),
+        delimiter=delim,
+    )
+
+    return render_template_string(
+        RESULT_HTML,
+        job_id=job_id,
+        rows=m.get("rows"),
+        cols=m.get("cols"),
+        changelog=m.get("changelog", []),
+        import_warning=bool(m.get("import_warning")),
+        near_dupes_mode=near_dupes_mode,
+        ignored_cols=ignored_cols,
+        near_dupe_examples=near_dupe_examples_tables,
+        preview_first=preview_first,
+        preview_last=preview_last,
+        preview_repaired=preview_repaired,
+        retention=RETENTION_MINUTES,
+        paid=bool(m.get("paid")),
+        payments_enabled=PAYMENTS_ENABLED,
+        detected_delimiter=delim,
+        detected_delimiter_label=delimiter_label(delim),
+        payment_pending=payment_pending,
+        support_email=SUPPORT_EMAIL,
+    )
 
 @app.get("/cancel")
 def cancel():
