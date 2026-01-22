@@ -10,7 +10,7 @@ import uuid
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, Tuple
 
 import pandas as pd
 import stripe
@@ -47,7 +47,7 @@ PAYMENTS_ENABLED = bool(stripe.api_key and PRICE_ID)
 SUPPORT_EMAIL = "carney.christopher22@gmail.com"
 
 # ============================
-# HTML (Phase 1 copy included)
+# HTML
 # ============================
 INDEX_HTML = """
 <!doctype html>
@@ -133,6 +133,7 @@ RESULT_HTML = """
     ul { margin: 8px 0 0 18px; }
     .pill { display:inline-block; padding:4px 10px; border:1px solid #ddd; border-radius:999px; font-size:12px; color:#333; }
     .warn { color:#8a6d3b; }
+    .ok { color:#1b5e20; }
     .section-title { margin: 0 0 8px; }
 
     .chip { display:inline-block; padding:4px 10px; border:1px solid #ddd; border-radius:999px; font-size:12px; margin: 4px 6px 0 0; }
@@ -161,6 +162,14 @@ RESULT_HTML = """
 
     .subhead { font-weight: 600; margin: 0 0 6px; }
     .compare-note { margin: 0 0 10px; }
+
+    .callout {
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      padding: 12px;
+      background: #fafafa;
+      margin-top: 12px;
+    }
   </style>
 </head>
 <body>
@@ -175,6 +184,17 @@ RESULT_HTML = """
 
   <div class="card">
     <p><b>Rows:</b> {{ rows }} &nbsp; <b>Columns:</b> {{ cols }}</p>
+
+    {% if payment_pending %}
+      <div class="callout">
+        <p class="muted" style="margin:0;">
+          <b>Payment pending.</b> If you just paid, the webhook may take a few seconds. Refresh in ~5 seconds.
+        </p>
+        <p style="margin:10px 0 0;">
+          <a class="btn secondary" href="/result/{{ job_id }}">Refresh status</a>
+        </p>
+      </div>
+    {% endif %}
 
     {% if import_warning %}
       <p class="warn"><b>Note:</b> Some rows would have broken imports (wrong number of columns). We repaired them to match the header.</p>
@@ -373,6 +393,7 @@ def write_manifest(job_id: str, data: dict[str, Any]) -> None:
         "paid": False,
         "paid_at": None,
         "stripe_session_id": None,
+        "stripe_event_id": None,
         "rows": None,
         "cols": None,
         "changelog": [],
@@ -402,7 +423,6 @@ def mark_paid(job_id: str, session_id: str | None = None, event_id: str | None =
     m = read_manifest(job_id)
     if not m:
         return
-    # Idempotency: if already marked paid, no-op.
     if m.get("paid"):
         return
     m["paid"] = True
@@ -488,8 +508,7 @@ def read_csv_lenient(path: Path, delimiter: str) -> tuple[pd.DataFrame, list[str
         reader = csv.reader(f, delimiter=delimiter)
         for r in reader:
             rows.append(r)
-            # header + MAX_ROWS data rows
-            if len(rows) > (MAX_ROWS + 1):
+            if len(rows) > (MAX_ROWS + 1):  # header + MAX_ROWS data rows
                 raise ValueError(f"Too many rows. Limit is {MAX_ROWS:,} data rows.")
 
     if not rows:
@@ -764,6 +783,9 @@ def result(job_id: str):
     if near_dupes_mode and examples_rows:
         near_dupe_examples_tables = [render_near_dupe_compare_table(ex, near_dupes_mode) for ex in examples_rows]
 
+    # Payment UX: show pending if checkout session exists but not yet paid
+    payment_pending = bool(PAYMENTS_ENABLED and (not m.get("paid")) and m.get("stripe_session_id"))
+
     return render_template_string(
         RESULT_HTML,
         job_id=job_id,
@@ -782,6 +804,7 @@ def result(job_id: str):
         payments_enabled=PAYMENTS_ENABLED,
         detected_delimiter=delim,
         detected_delimiter_label=delimiter_label(delim),
+        payment_pending=payment_pending,
     )
 
 
@@ -952,6 +975,7 @@ def upload():
         payments_enabled=PAYMENTS_ENABLED,
         detected_delimiter=delim,
         detected_delimiter_label=delimiter_label(delim),
+        payment_pending=False,
     )
 
 
@@ -982,6 +1006,10 @@ def download(job_id: str):
     if not PAYMENTS_ENABLED:
         return send_file(op, as_attachment=True, download_name=cleaned_download_name(delim))
 
+    # Payment UX: if a payment session exists but we're not marked paid yet, don't bounce user back to Stripe.
+    if not m.get("paid") and m.get("stripe_session_id"):
+        return redirect(f"/result/{job_id}", code=303)
+
     if not m.get("paid"):
         return redirect(f"/pay/{job_id}", code=303)
 
@@ -1007,6 +1035,11 @@ def pay(job_id: str):
         cancel_url=f"{BASE_URL}/cancel?job_id={job_id}",
         metadata={"job_id": job_id},
     )
+
+    # Payment UX: persist session id immediately so results can show "pending"
+    m["stripe_session_id"] = session.get("id")
+    write_manifest(job_id, m)
+
     return redirect(session.url, code=303)
 
 
@@ -1059,7 +1092,6 @@ def stripe_webhook():
     except stripe.error.SignatureVerificationError:
         return ("Invalid signature", 400)
 
-    # Idempotency: ignore already-processed events
     event_id = event.get("id")
 
     if event["type"] == "checkout.session.completed":
@@ -1069,7 +1101,6 @@ def stripe_webhook():
         session_id = session.get("id")
 
         if job_id:
-            # If we already saved this event id, no-op (best effort)
             m = read_manifest(job_id)
             if m.get("stripe_event_id") == event_id:
                 return ("ok", 200)
@@ -1079,5 +1110,5 @@ def stripe_webhook():
 
 
 if __name__ == "__main__":
-    # Local dev only. Render runs gunicorn.
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    debug = os.environ.get("FLASK_DEBUG", "").lower() in {"1", "true", "yes"}
+    app.run(host="127.0.0.1", port=5000, debug=debug)
