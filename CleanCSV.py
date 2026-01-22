@@ -668,6 +668,51 @@ def clean_csv(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     df, l = remove_duplicates_and_empty_rows(df); changelog += l
     return df, changelog
 
+def _should_ignore_col(col: str) -> bool:
+    s = str(col).lower().strip()
+    if s == "id" or s.endswith("_id") or s.startswith("id_") or "_id_" in s:
+        return True
+    if "uuid" in s or "guid" in s:
+        return True
+    if "transaction" in s or "txn" in s:
+        return True
+    if "reference" in s or s in {"ref", "reference"} or "ref_" in s or s.endswith("_ref"):
+        return True
+    if "date" in s or "time" in s or "timestamp" in s or s.endswith("_at"):
+        return True
+    if "balance" in s or "running_total" in s or "remaining" in s:
+        return True
+    return False
+
+
+def _normalize_text_for_compare(x: Any) -> str:
+    if x is None:
+        return ""
+    s = str(x)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip().lower()
+
+
+def _row_to_dict(df: pd.DataFrame, idx: int) -> dict:
+    row = df.iloc[idx].to_dict()
+    return {k: _json_safe(v) for k, v in row.items()}
+
+
+def render_near_dupe_compare_table(ex: dict, mode: str) -> str:
+    removed_label = "Would remove" if mode == "preview" else "Removed"
+    kept = dict(ex["kept"])
+    removed = dict(ex["removed"])
+
+    cols = list(kept.keys())
+    for k in removed.keys():
+        if k not in cols:
+            cols.append(k)
+
+    kept_row = {"status": "Kept", **{k: kept.get(k) for k in cols}}
+    rem_row = {"status": removed_label, **{k: removed.get(k) for k in cols}}
+
+    df = pd.DataFrame([kept_row, rem_row])
+    return df.to_html(index=False, escape=True)
 
 # ============================
 # Near-duplicate analysis (preview/remove + examples)
