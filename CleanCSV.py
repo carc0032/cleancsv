@@ -131,6 +131,30 @@ INDEX_HTML = """
           <li><b>Detects delimiter</b> (CSV / TSV / semicolon / pipe) automatically.</li>
           <li><b>Stitches quoted multiline records</b> (newlines inside "quoted" fields).</li>
         </ul>
+    <div class="card" style="margin-top:20px; background:#fafafa;">
+        <p class="label"><b>Example: real-world CSV → cleaned output</b></p>
+
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px;">
+    <div>
+      <p class="muted" style="margin:0 0 6px;"><b>Before</b> (breaks imports)</p>
+      <pre style="background:#fff; border:1px solid #e5e7eb; border-radius:8px; padding:10px; font-size:12px; overflow:auto;">
+        Report: Transactions
+        Generated: 2026-01-22
+        id;amount;note
+        1;1.234,56;"Refund
+        processed"
+      </pre>
+    </div>
+
+    <div>
+      <p class="muted" style="margin:0 0 6px;"><b>After</b> (CleanCSV output)</p>
+      <pre style="background:#fff; border:1px solid #e5e7eb; border-radius:8px; padding:10px; font-size:12px; overflow:auto;">
+id,amount,note
+1,1234.56,Refund processed
+      </pre>
+    </div>
+  </div>
+</div>
       </div>
 
       <div class="card">
@@ -189,13 +213,538 @@ INDEX_HTML = """
     </div>
 
     <footer>
-      <div class="footer-left">
-        <span>Files auto-delete after {{ retention }} minutes.</span>
-        <span>Support: {{ support_email }}</span>
-        <span>CSV/TSV only (text files)</span>
-      </div>
-      <div><span class="pill">Secure checkout via Stripe</span></div>
-    </footer>
+  <div class="footer-left">
+    <span>Files auto-delete after {{ retention }} minutes.</span>
+    <span>Support: {{ support_email }}</span>
+    <span>CSV/TSV only (text files)</span>
+    <span><a href="/problems">Common CSV import problems</a></span>
+  </div>
+  <div>
+    <span class="pill">Secure checkout via Stripe</span>
+  </div>
+</footer>
+  </div>
+</body>
+</html>
+"""
+PROBLEM_EXPECTED_FIELDS_HTML = """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Fix CSV import error: “Expected 3 fields, saw 5”</title>
+  <meta name="description" content="Explanation of the CSV import error “Expected 3 fields, saw 5” and how to fix it by repairing inconsistent rows and malformed records." />
+  <link rel="canonical" href="{{ BASE_URL }}/problems/expected-fields-error" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background:#fff; color:#111; }
+    .wrap { max-width: 760px; margin: 0 auto; padding: 48px 20px; }
+    h1 { font-size: 32px; margin-bottom: 16px; }
+    p { line-height: 1.6; margin: 12px 0; }
+    ul { margin: 12px 0 16px 20px; }
+    pre {
+      background: #f8f8f8;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 13px;
+      overflow-x: auto;
+    }
+    .note {
+      background: #fafafa;
+      border-left: 4px solid #ddd;
+      padding: 12px;
+      margin: 20px 0;
+    }
+    .quiet-link {
+      margin-top: 28px;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Fix CSV import error: “Expected 3 fields, saw 5”</h1>
+
+    <p>
+      This error occurs when rows in a CSV file contain more columns than the header row.
+      Many tools stop importing when this happens.
+    </p>
+
+    <p>Common causes include:</p>
+    <ul>
+      <li>Extra delimiters inside text fields</li>
+      <li>Line breaks inside quoted values</li>
+      <li>Inconsistent exports from reporting tools</li>
+    </ul>
+
+    <p><b>Example of a broken CSV</b></p>
+
+    <pre>
+id,name,amount
+1,"ACME, Inc",100
+2,Widget,200,EXTRA
+    </pre>
+
+    <p><b>After repairing the file</b></p>
+
+    <pre>
+id,name,amount
+1,ACME, Inc,100
+2,Widget,200
+    </pre>
+
+    <div class="note">
+      The fix is to repair row structure so every row matches the header
+      and malformed records are stitched back together correctly.
+    </div>
+
+    <div class="quiet-link">
+      If you want to fix the file automatically, you can upload it here:
+      <a href="/">CleanCSV</a>
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+PROBLEM_EXCEL_ONE_COLUMN_HTML = """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Excel CSV opens in one column — wrong delimiter</title>
+  <meta name="description" content="Why Excel opens some CSV files in a single column and how to fix delimiter issues so data imports into separate columns correctly." />
+  <link rel="canonical" href="{{ BASE_URL }}/problems/excel-one-column-csv" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background:#fff; color:#111; }
+    .wrap { max-width: 760px; margin: 0 auto; padding: 48px 20px; }
+    h1 { font-size: 32px; margin-bottom: 16px; }
+    p { line-height: 1.6; margin: 12px 0; }
+    ul { margin: 12px 0 16px 20px; }
+    pre { background: #f8f8f8; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; font-size: 13px; overflow-x: auto; }
+    .note { background: #fafafa; border-left: 4px solid #ddd; padding: 12px; margin: 20px 0; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Excel CSV opens in one column — wrong delimiter</h1>
+
+    <p>
+      If your CSV opens entirely in a single column in Excel, it usually means
+      Excel guessed the wrong delimiter.
+    </p>
+
+    <p>This often happens when:</p>
+    <ul>
+      <li>The file uses semicolons instead of commas</li>
+      <li>The system locale expects decimal commas</li>
+      <li>The CSV was exported from European software</li>
+    </ul>
+
+    <p><b>Example CSV</b></p>
+    <pre>
+id;amount;description
+1;1.234,56;Invoice
+2;12,34;Refund
+    </pre>
+
+    <p><b>After fixing the delimiter</b></p>
+    <pre>
+id,amount,description
+1,1234.56,Invoice
+2,12.34,Refund
+    </pre>
+
+    <div class="note">
+      The fix is to detect the correct delimiter and normalize numeric formats
+      so Excel and other tools parse the file correctly.
+    </div>
+
+    <p>
+      To fix the file automatically, upload it here:
+      <a href="/">CleanCSV</a>
+    </p>
+  </div>
+</body>
+</html>
+"""
+PROBLEM_EXPECTED_FIELDS_SAW_FIELDS_HTML = """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Fix CSV error: Expected N fields in line X, saw Y</title>
+  <meta name="description" content="Why the CSV error “Expected N fields in line X, saw Y” occurs in pandas and other tools, and how to repair the file so it imports correctly." />
+  <link rel="canonical" href="{{ BASE_URL }}/problems/expected-fields-saw-fields" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      margin: 0;
+      background: #fff;
+      color: #111;
+    }
+    .wrap {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 48px 20px;
+    }
+    h1 {
+      font-size: 32px;
+      margin-bottom: 16px;
+    }
+    p {
+      line-height: 1.6;
+      margin: 12px 0;
+    }
+    ul {
+      margin: 12px 0 16px 20px;
+    }
+    pre {
+      background: #f8f8f8;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 13px;
+      overflow-x: auto;
+    }
+    .note {
+      background: #fafafa;
+      border-left: 4px solid #ddd;
+      padding: 12px;
+      margin: 20px 0;
+    }
+    .muted {
+      color: #666;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Fix CSV error: “Expected N fields in line X, saw Y”</h1>
+
+    <p>
+      This error means that not all rows in your CSV file have the same number of columns.
+      Strict parsers (like pandas, Excel, Power BI, and databases) stop importing when this happens.
+    </p>
+
+    <p>Common causes include:</p>
+    <ul>
+      <li>Extra delimiters inside text fields</li>
+      <li>Newlines inside quoted values</li>
+      <li>Wrong delimiter guessed (comma vs semicolon vs tab)</li>
+      <li>Report-style exports with header text above the real CSV header</li>
+    </ul>
+
+    <p class="muted">You may see an error like:</p>
+    <pre>Error tokenizing data. C error: Expected 13 fields in line 64, saw 15</pre>
+
+    <p><b>Example of a CSV that triggers this error</b></p>
+    <pre>
+id,name,amount
+1,"ACME, Inc",100
+2,Widget,200,EXTRA
+    </pre>
+
+    <p><b>After repairing the file</b></p>
+    <pre>
+id,name,amount
+1,ACME, Inc,100
+2,Widget,200
+    </pre>
+
+    <div class="note">
+      The fix is to normalize row structure so every row matches the header,
+      stitch multiline quoted records back into a single row,
+      and ensure the correct delimiter is used.
+    </div>
+
+    <p>
+      To fix the file automatically, upload it here:
+      <a href="/">CleanCSV</a>
+    </p>
+  </div>
+</body>
+</html>
+"""
+
+PROBLEM_EXPECTED_FIELDS_SAW_FIELDS_HTML = """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Fix CSV error: Expected N fields in line X, saw Y (pandas / import)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background:#fff; color:#111; }
+    .wrap { max-width: 760px; margin: 0 auto; padding: 48px 20px; }
+    h1 { font-size: 32px; margin-bottom: 16px; }
+    p { line-height: 1.6; margin: 12px 0; }
+    ul { margin: 12px 0 16px 20px; }
+    pre { background: #f8f8f8; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; font-size: 13px; overflow-x: auto; }
+    code { background:#f1f5f9; padding: 2px 6px; border-radius: 6px; }
+    .note { background: #fafafa; border-left: 4px solid #ddd; padding: 12px; margin: 20px 0; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Fix CSV error: “Expected N fields in line X, saw Y”</h1>
+
+    <p>
+      This error means your CSV rows don’t all have the same number of columns.
+      It commonly appears when importing with pandas (<code>read_csv</code>), Excel, Power BI,
+      databases, or other strict parsers.
+    </p>
+
+    <p>Typical causes:</p>
+    <ul>
+      <li>Extra delimiters in some rows (e.g., commas inside unquoted text)</li>
+      <li>Newlines inside quoted fields (a single record spans multiple lines)</li>
+      <li>Wrong delimiter guessed (comma vs semicolon vs tab)</li>
+      <li>Report-style exports with preamble lines above the real header</li>
+    </ul>
+    <p><b>Common pandas error message</b></p>
+    <pre>Error tokenizing data. C error: Expected 13 fields in line 64, saw 15</pre>
+    
+    <p><b>Example of a file that triggers the error</b></p>
+    <pre>
+id,name,amount
+1,"ACME, Inc",100
+2,Widget,200,EXTRA
+    </pre>
+
+    <p><b>After repair</b></p>
+    <pre>
+id,name,amount
+1,ACME, Inc,100
+2,Widget,200
+    </pre>
+
+    <div class="note">
+      The fix is to normalize row structure (pad/truncate to the header width),
+      stitch multiline quoted records back into single rows, and ensure the correct delimiter is used.
+    </div>
+
+    <p>
+      To fix the file automatically, upload it here:
+      <a href="/">CleanCSV</a>
+    </p>
+  </div>
+</body>
+</html>
+"""
+PROBLEM_CSV_ENCODING_HTML = """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Fix CSV encoding issues (�, UTF-8 vs Windows-1252)</title>
+  <meta name="description" content="Why CSV files show weird characters like � and how to fix encoding issues by converting Windows-1252 and other encodings to UTF-8." />
+  <link rel="canonical" href="{{ BASE_URL }}/problems/csv-encoding-utf8-windows-1252" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background:#fff; color:#111; }
+    .wrap { max-width: 760px; margin: 0 auto; padding: 48px 20px; }
+    h1 { font-size: 32px; margin-bottom: 16px; }
+    p { line-height: 1.6; margin: 12px 0; }
+    ul { margin: 12px 0 16px 20px; }
+    pre { background: #f8f8f8; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; font-size: 13px; overflow-x: auto; }
+    code { background:#f1f5f9; padding: 2px 6px; border-radius: 6px; }
+    .note { background: #fafafa; border-left: 4px solid #ddd; padding: 12px; margin: 20px 0; }
+    .muted { color: #666; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Fix CSV encoding issues (�, UTF-8 vs Windows-1252)</h1>
+
+    <p>
+      If your CSV imports with weird characters (like <code>�</code>), broken quotes, or garbled symbols,
+      the file is likely using a different text encoding than your tool expects.
+    </p>
+
+    <p>Common symptoms:</p>
+    <ul>
+      <li>Curly quotes turn into <code>�</code> or random symbols</li>
+      <li>Currency symbols like <code>€</code> or <code>£</code> don’t display correctly</li>
+      <li>Accented characters (e.g., <code>café</code>) appear corrupted</li>
+    </ul>
+
+    <p class="muted">You might see characters like this:</p>
+    <pre>Alice,â€œsmart quotesâ€ â€” cafÃ©</pre>
+
+    <p><b>After decoding properly</b></p>
+    <pre>Alice,“smart quotes” — café</pre>
+
+    <div class="note">
+      The fix is to detect the correct encoding (often <b>Windows-1252</b> / <b>cp1252</b> for exports from older systems),
+      decode the file safely, and re-save as UTF-8 for maximum compatibility.
+    </div>
+
+    <p>
+      To fix the file automatically, upload it here:
+      <a href="/">CleanCSV</a>
+    </p>
+  </div>
+</body>
+</html>
+"""
+
+PROBLEM_POWERBI_DECIMAL_COMMA_HTML = """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Power BI CSV decimal comma issue — fix import parsing</title>
+  <meta name="description" content="Fix Power BI CSV import problems caused by decimal commas and European number formats by normalizing delimiters and numeric values." />
+  <link rel="canonical" href="{{ BASE_URL }}/problems/powerbi-decimal-comma-csv" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background:#fff; color:#111; }
+    .wrap { max-width: 760px; margin: 0 auto; padding: 48px 20px; }
+    h1 { font-size: 32px; margin-bottom: 16px; }
+    p { line-height: 1.6; margin: 12px 0; }
+    ul { margin: 12px 0 16px 20px; }
+    pre { background: #f8f8f8; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; font-size: 13px; overflow-x: auto; }
+    .note { background: #fafafa; border-left: 4px solid #ddd; padding: 12px; margin: 20px 0; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Power BI CSV decimal comma issue (EU number formats)</h1>
+
+    <p>
+      If Power BI imports your CSV but numbers come in as text, split incorrectly, or show errors,
+      the file may be using <b>European number formatting</b>:
+      decimal commas (e.g., <code>12,34</code>) and often semicolon delimiters (e.g., <code>;</code>).
+    </p>
+
+    <p>Common symptoms:</p>
+    <ul>
+      <li>Numeric columns import as text</li>
+      <li>Values like <code>1.234,56</code> don’t parse as numbers</li>
+      <li>Columns shift because Power BI guessed the wrong delimiter</li>
+    </ul>
+
+    <p><b>Example CSV (EU format)</b></p>
+    <pre>
+id;amount;description
+1;1.234,56;Invoice
+2;12,34;Refund
+3;(5,00);Chargeback
+    </pre>
+
+    <p><b>After normalization (Power BI-friendly)</b></p>
+    <pre>
+id,amount,description
+1,1234.56,Invoice
+2,12.34,Refund
+3,-5.00,Chargeback
+    </pre>
+
+    <div class="note">
+      The fix is to detect the correct delimiter and normalize numeric formats
+      (decimal commas, thousands separators, parentheses negatives) so Power BI can type the column as numeric.
+    </div>
+
+    <p>
+      To fix the file automatically, upload it here:
+      <a href="/">CleanCSV</a>
+    </p>
+  </div>
+</body>
+</html>
+"""
+PROBLEMS_INDEX_HTML = """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>CSV import problems CleanCSV fixes</title>
+  <meta name="description" content="A list of common CSV import errors and explanations of how to fix delimiter, encoding, and malformed record issues." />
+  <link rel="canonical" href="{{ BASE_URL }}/problems" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      margin: 0;
+      background: #fff;
+      color: #111;
+    }
+    .wrap {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 48px 20px;
+    }
+    h1 {
+      font-size: 32px;
+      margin-bottom: 12px;
+    }
+    p {
+      line-height: 1.6;
+      margin: 12px 0;
+    }
+    ul {
+      margin: 20px 0;
+      padding-left: 18px;
+    }
+    li {
+      margin: 12px 0;
+    }
+    a {
+      color: #111;
+      text-decoration: underline;
+    }
+    .muted {
+      color: #666;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>CSV import problems</h1>
+
+    <p>
+      These pages explain common CSV import errors and how to fix them.
+      Each page describes the issue and provides a way to repair the file automatically.
+    </p>
+
+    <ul>
+      <li>
+        <a href="/problems/expected-fields-error">
+          CSV import error: “Expected 3 fields, saw 5”
+        </a>
+      </li>
+      <li>
+        <a href="/problems/expected-fields-saw-fields">
+          pandas error: “Expected N fields in line X, saw Y”
+        </a>
+      </li>
+      <li>
+        <a href="/problems/excel-one-column-csv">
+          Excel CSV opens in one column (wrong delimiter)
+        </a>
+      </li>
+      <li>
+        <a href="/problems/powerbi-decimal-comma-csv">
+          Power BI CSV decimal comma issue (EU number formats)
+        </a>
+      </li>
+      <li>
+        <a href="/problems/csv-encoding-utf8-windows-1252">
+          CSV encoding issues (�, UTF-8 vs Windows-1252)
+        </a>
+      </li>
+    </ul>
+
+    <p class="muted">
+      To fix a file, upload it here:
+      <a href="/">CleanCSV</a>
+    </p>
   </div>
 </body>
 </html>
@@ -1090,6 +1639,53 @@ def is_payment_pending(m: dict) -> bool:
 # ============================
 # Routes
 # ============================
+
+@app.get("/sitemap.xml")
+def sitemap():
+    pages = [
+        "",
+        "/problems",
+        "/problems/expected-fields-error",
+        "/problems/expected-fields-saw-fields",
+        "/problems/excel-one-column-csv",
+        "/problems/powerbi-decimal-comma-csv",
+        "/problems/csv-encoding-utf8-windows-1252",
+    ]
+
+    xml = ['<?xml version="1.0" encoding="UTF-8"?>']
+    xml.append('<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">')
+
+    for p in pages:
+        xml.append("  <url>")
+        xml.append(f"    <loc>{BASE_URL}{p}</loc>")
+        xml.append("  </url>")
+
+    xml.append("</urlset>")
+    return app.response_class("\n".join(xml), mimetype="application/xml")
+
+@app.get("/problems")
+def problems_index():
+    return render_template_string(PROBLEMS_INDEX_HTML)
+
+@app.get("/problems/csv-encoding-utf8-windows-1252")
+def problem_csv_encoding():
+    return render_template_string(PROBLEM_CSV_ENCODING_HTML)
+
+@app.get("/problems/expected-fields-saw-fields")
+def problem_expected_fields_saw_fields():
+    return render_template_string(PROBLEM_EXPECTED_FIELDS_SAW_FIELDS_HTML)
+
+@app.get("/problems/powerbi-decimal-comma-csv")
+def problem_powerbi_decimal_comma():
+    return render_template_string(PROBLEM_POWERBI_DECIMAL_COMMA_HTML)
+
+@app.get("/problems/excel-one-column-csv")
+def problem_excel_one_column():
+    return render_template_string(PROBLEM_EXCEL_ONE_COLUMN_HTML)
+
+@app.get("/problems/expected-fields-error")
+def problem_expected_fields():
+    return render_template_string(PROBLEM_EXPECTED_FIELDS_HTML)
 
 @app.get("/favicon.ico")
 def favicon():
