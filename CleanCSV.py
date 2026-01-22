@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -10,13 +12,52 @@ import uuid
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, List, Tuple
+from typing import Any, List
 
 import pandas as pd
 import stripe
 from flask import Flask, abort, redirect, render_template_string, request, send_file
 
 app = Flask(__name__)
+
+# ============================
+# Logging
+# ============================
+LOG_LEVEL = os.environ.get("CLEANCCSV_LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format="%(message)s")
+logger = logging.getLogger("cleancsv")
+
+
+def get_client_ip() -> str:
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.remote_addr or "unknown"
+
+
+def ip_hash(ip: str) -> str:
+    return hashlib.sha256(ip.encode("utf-8")).hexdigest()[:12]
+
+
+def log_event(event: str, **fields: Any) -> None:
+    payload = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "event": event,
+        "service": "cleancsv",
+    }
+    try:
+        payload["path"] = request.path
+        payload["method"] = request.method
+        payload["ua"] = request.headers.get("User-Agent", "")
+        payload["ip_hash"] = ip_hash(get_client_ip())
+    except Exception:
+        pass
+
+    for k, v in fields.items():
+        payload[k] = v
+
+    logger.info(json.dumps(payload, default=str))
+
 
 # ============================
 # Config
@@ -39,7 +80,6 @@ stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "")
 BASE_URL = os.environ.get("APP_BASE_URL", "http://127.0.0.1:5000")
 
-# Webhook signing secret from Stripe Dashboard -> Developers -> Webhooks -> endpoint -> Signing secret
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 
 PAYMENTS_ENABLED = bool(stripe.api_key and PRICE_ID)
@@ -79,7 +119,7 @@ INDEX_HTML = """
 
   <div class="card">
     <form action="/upload" method="post" enctype="multipart/form-data">
-      <input type="file" name="file" required />
+      <input type="file" name="file" required accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values,text/plain" />
 
       <div class="opt">
         <label>
@@ -133,7 +173,6 @@ RESULT_HTML = """
     ul { margin: 8px 0 0 18px; }
     .pill { display:inline-block; padding:4px 10px; border:1px solid #ddd; border-radius:999px; font-size:12px; color:#333; }
     .warn { color:#8a6d3b; }
-    .ok { color:#1b5e20; }
     .section-title { margin: 0 0 8px; }
 
     .chip { display:inline-block; padding:4px 10px; border:1px solid #ddd; border-radius:999px; font-size:12px; margin: 4px 6px 0 0; }
@@ -314,13 +353,6 @@ CANCEL_HTML = """
 _upload_hits = defaultdict(deque)  # ip -> deque[timestamps]
 
 
-def get_client_ip() -> str:
-    xff = request.headers.get("X-Forwarded-For", "")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.remote_addr or "unknown"
-
-
 def rate_limit_check(ip: str) -> bool:
     now = time.time()
     q = _upload_hits[ip]
@@ -338,6 +370,11 @@ def looks_like_text_file(path: Path, sample_bytes: int = 4096) -> bool:
     except Exception:
         return False
     return b"\x00" not in b
+
+
+def looks_like_csv_name(filename: str) -> bool:
+    fn = (filename or "").lower().strip()
+    return fn.endswith(".csv") or fn.endswith(".tsv") or fn.endswith(".txt")
 
 
 # ============================
@@ -479,7 +516,7 @@ def detect_delimiter(path: Path) -> tuple[str, list[str]]:
             continue
         avg = sum(counts) / len(counts)
         var = sum((c - avg) ** 2 for c in counts) / len(counts)
-        score = avg - (var ** 0.5)
+        score = avg - (var**0.5)
         if score > best_score:
             best_score = score
             best = d
@@ -497,10 +534,6 @@ def cleaned_download_name(delim: str) -> str:
 
 
 def read_csv_lenient(path: Path, delimiter: str) -> tuple[pd.DataFrame, list[str], bool, list[int]]:
-    """
-    Pads/truncates rows to match the header length so malformed rows don't crash parsing.
-    Enforces MAX_ROWS/MAX_COLS.
-    """
     import_log: list[str] = []
     rows: list[list[str]] = []
 
@@ -508,7 +541,7 @@ def read_csv_lenient(path: Path, delimiter: str) -> tuple[pd.DataFrame, list[str
         reader = csv.reader(f, delimiter=delimiter)
         for r in reader:
             rows.append(r)
-            if len(rows) > (MAX_ROWS + 1):  # header + MAX_ROWS data rows
+            if len(rows) > (MAX_ROWS + 1):
                 raise ValueError(f"Too many rows. Limit is {MAX_ROWS:,} data rows.")
 
     if not rows:
@@ -637,38 +670,8 @@ def clean_csv(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
 
 
 # ============================
-# Near-duplicate analysis (dry-run/remove + examples)
+# Near-duplicate analysis (preview/remove + examples)
 # ============================
-def _should_ignore_col(col: str) -> bool:
-    s = str(col).lower().strip()
-    if s == "id" or s.endswith("_id") or s.startswith("id_") or "_id_" in s:
-        return True
-    if "uuid" in s or "guid" in s:
-        return True
-    if "transaction" in s or "txn" in s:
-        return True
-    if "reference" in s or s in {"ref", "reference"} or "ref_" in s or s.endswith("_ref"):
-        return True
-    if "date" in s or "time" in s or "timestamp" in s or s.endswith("_at"):
-        return True
-    if "balance" in s or "running_total" in s or "remaining" in s:
-        return True
-    return False
-
-
-def _normalize_text_for_compare(x: Any) -> str:
-    if x is None:
-        return ""
-    s = str(x)
-    s = re.sub(r"\s+", " ", s)
-    return s.strip().lower()
-
-
-def _row_to_dict(df: pd.DataFrame, idx: int) -> dict:
-    row = df.iloc[idx].to_dict()
-    return {k: _json_safe(v) for k, v in row.items()}
-
-
 def analyze_near_duplicates(df: pd.DataFrame, max_examples: int = 5) -> tuple[list[str], int, list[dict], pd.Series]:
     ignored_cols = [c for c in df.columns if _should_ignore_col(c)]
     compare_cols = [c for c in df.columns if c not in ignored_cols]
@@ -701,21 +704,6 @@ def analyze_near_duplicates(df: pd.DataFrame, max_examples: int = 5) -> tuple[li
     return ignored_cols, dup_count, examples, dup_mask
 
 
-def render_near_dupe_compare_table(ex: dict, mode: str) -> str:
-    removed_label = "Would remove" if mode == "preview" else "Removed"
-    kept = dict(ex["kept"])
-    removed = dict(ex["removed"])
-    cols = list(kept.keys())
-    for k in removed.keys():
-        if k not in cols:
-            cols.append(k)
-
-    kept_row = {"status": "Kept", **{k: kept.get(k) for k in cols}}
-    rem_row = {"status": removed_label, **{k: removed.get(k) for k in cols}}
-    df = pd.DataFrame([kept_row, rem_row])
-    return df.to_html(index=False, escape=True)
-
-
 # ============================
 # Previews
 # ============================
@@ -746,6 +734,7 @@ def build_previews(df: pd.DataFrame, repaired_indices: list[int]) -> tuple[str, 
 @app.get("/")
 def index():
     cleanup_old_files()
+    log_event("page_view_home", payments_enabled=PAYMENTS_ENABLED)
     return render_template_string(
         INDEX_HTML,
         error=None,
@@ -765,12 +754,14 @@ def result(job_id: str):
     m = read_manifest(job_id)
     op = out_path(job_id)
     if not m or not op.exists():
+        log_event("result_not_found", job_id=job_id)
         abort(404)
 
     delim = m.get("detected_delimiter") or ","
     try:
         df = pd.read_csv(op, encoding="utf-8", sep=delim)
-    except Exception:
+    except Exception as e:
+        log_event("result_read_error", job_id=job_id, error=str(e))
         df = pd.DataFrame()
 
     repaired_indices = m.get("repaired_row_indices", []) or []
@@ -783,8 +774,17 @@ def result(job_id: str):
     if near_dupes_mode and examples_rows:
         near_dupe_examples_tables = [render_near_dupe_compare_table(ex, near_dupes_mode) for ex in examples_rows]
 
-    # Payment UX: show pending if checkout session exists but not yet paid
     payment_pending = bool(PAYMENTS_ENABLED and (not m.get("paid")) and m.get("stripe_session_id"))
+
+    log_event(
+        "result_view",
+        job_id=job_id,
+        paid=bool(m.get("paid")),
+        payment_pending=payment_pending,
+        rows=m.get("rows"),
+        cols=m.get("cols"),
+        delimiter=delim,
+    )
 
     return render_template_string(
         RESULT_HTML,
@@ -813,6 +813,7 @@ def upload():
     cleanup_old_files()
 
     if bytes_too_large(request):
+        log_event("upload_rejected_file_too_large", file_bytes=request.content_length)
         return render_template_string(
             INDEX_HTML,
             error=f"File too large. Max is {MAX_BYTES // (1024 * 1024)} MB.",
@@ -825,9 +826,9 @@ def upload():
             rate_max=RATE_MAX_UPLOADS,
         ), 413
 
-    # Rate limit per IP
     ip = get_client_ip()
     if not rate_limit_check(ip):
+        log_event("upload_rate_limited")
         return render_template_string(
             INDEX_HTML,
             error=f"Rate limit: too many uploads. Please wait {RATE_WINDOW_SECONDS} seconds and try again.",
@@ -842,9 +843,25 @@ def upload():
 
     f = request.files.get("file")
     if not f or not f.filename:
+        log_event("upload_missing_file")
         abort(400)
 
     original_filename = f.filename
+
+    # Extension hint (server-side)
+    if not looks_like_csv_name(original_filename):
+        log_event("upload_rejected_extension", filename=original_filename)
+        return render_template_string(
+            INDEX_HTML,
+            error="Please upload a .csv or .tsv file (a .txt export is also OK).",
+            max_mb=MAX_BYTES // (1024 * 1024),
+            retention=RETENTION_MINUTES,
+            payments_enabled=PAYMENTS_ENABLED,
+            max_rows=MAX_ROWS,
+            max_cols=MAX_COLS,
+            rate_window=RATE_WINDOW_SECONDS,
+            rate_max=RATE_MAX_UPLOADS,
+        ), 400
 
     near_preview = bool(request.form.get("near_dupes_preview"))
     near_remove = bool(request.form.get("near_dupes_remove"))
@@ -856,11 +873,19 @@ def upload():
     np = norm_path(job_id)
     op = out_path(job_id)
 
-    # Save raw
+    log_event(
+        "upload_start",
+        job_id=job_id,
+        filename=original_filename,
+        file_bytes=request.content_length,
+        near_preview=near_preview,
+        near_remove=near_remove,
+    )
+
     f.save(rp)
 
-    # Reject obvious binary files
     if not looks_like_text_file(rp):
+        log_event("upload_rejected_binary", job_id=job_id, filename=original_filename)
         rp.unlink(missing_ok=True)
         return render_template_string(
             INDEX_HTML,
@@ -874,14 +899,13 @@ def upload():
             rate_max=RATE_MAX_UPLOADS,
         ), 400
 
-    # Normalize newlines for parsing
     parse_path, structural_log = normalize_line_endings_to_lf(rp, np)
 
-    # Detect delimiter + parse leniently with limits
     delim, delim_log = detect_delimiter(parse_path)
     try:
         df, import_log, import_warning, repaired_indices = read_csv_lenient(parse_path, delimiter=delim)
     except ValueError as e:
+        log_event("upload_rejected_limits_or_parse", job_id=job_id, error=str(e), delimiter=delim)
         rp.unlink(missing_ok=True)
         np.unlink(missing_ok=True)
         return render_template_string(
@@ -896,7 +920,16 @@ def upload():
             rate_max=RATE_MAX_UPLOADS,
         ), 400
 
-    # Clean
+    log_event(
+        "upload_parsed",
+        job_id=job_id,
+        delimiter=delim,
+        import_warning=import_warning,
+        repaired_rows=len(repaired_indices),
+        cols=len(df.columns),
+        rows=len(df),
+    )
+
     df2, clean_log = clean_csv(df)
     changelog = structural_log + delim_log + import_log + clean_log
 
@@ -928,11 +961,8 @@ def upload():
         )
         near_dupe_examples_tables = [render_near_dupe_compare_table(ex, near_dupes_mode) for ex in near_dupe_examples_rows]
 
-    # Write output with same delimiter
     df2.to_csv(op, index=False, encoding="utf-8", lineterminator="\n", sep=delim)
     changelog.append(f"Wrote output as UTF-8 with standard newlines using delimiter {repr(delim)}.")
-
-    # Delete normalized parse file
     np.unlink(missing_ok=True)
 
     rows, cols = int(df2.shape[0]), int(df2.shape[1])
@@ -955,6 +985,17 @@ def upload():
             "original_file": rp.name,
             "original_filename": original_filename or "original.csv",
         },
+    )
+
+    log_event(
+        "upload_complete",
+        job_id=job_id,
+        delimiter=delim,
+        rows=rows,
+        cols=cols,
+        near_dupes_mode=near_dupes_mode,
+        near_dupes_count=near_dupes_count,
+        paid=False,
     )
 
     return render_template_string(
@@ -984,12 +1025,15 @@ def download_original(job_id: str):
     cleanup_old_files()
     m = read_manifest(job_id)
     if not m:
+        log_event("download_original_not_found", job_id=job_id)
         abort(404)
 
     p = WORK_DIR / str(m.get("original_file") or "")
     if not p.exists():
+        log_event("download_original_missing_file", job_id=job_id)
         abort(404)
 
+    log_event("download_original_served", job_id=job_id, filename=m.get("original_filename"))
     return send_file(p, as_attachment=True, download_name=m.get("original_filename") or "original.csv")
 
 
@@ -999,20 +1043,24 @@ def download(job_id: str):
     m = read_manifest(job_id)
     op = out_path(job_id)
     if not m or not op.exists():
+        log_event("download_not_found", job_id=job_id)
         abort(404)
 
     delim = m.get("detected_delimiter") or ","
 
     if not PAYMENTS_ENABLED:
+        log_event("download_served_free", job_id=job_id, delimiter=delim)
         return send_file(op, as_attachment=True, download_name=cleaned_download_name(delim))
 
-    # Payment UX: if a payment session exists but we're not marked paid yet, don't bounce user back to Stripe.
     if not m.get("paid") and m.get("stripe_session_id"):
+        log_event("download_blocked_pending", job_id=job_id, stripe_session_id=m.get("stripe_session_id"))
         return redirect(f"/result/{job_id}", code=303)
 
     if not m.get("paid"):
+        log_event("download_redirect_pay", job_id=job_id)
         return redirect(f"/pay/{job_id}", code=303)
 
+    log_event("download_served_paid", job_id=job_id, delimiter=delim)
     return send_file(op, as_attachment=True, download_name=cleaned_download_name(delim))
 
 
@@ -1021,11 +1069,13 @@ def pay(job_id: str):
     cleanup_old_files()
 
     if not PAYMENTS_ENABLED:
+        log_event("pay_disabled", job_id=job_id)
         return redirect(f"/download/{job_id}", code=303)
 
     m = read_manifest(job_id)
     op = out_path(job_id)
     if not m or not op.exists():
+        log_event("pay_not_found", job_id=job_id)
         abort(404)
 
     session = stripe.checkout.Session.create(
@@ -1036,10 +1086,10 @@ def pay(job_id: str):
         metadata={"job_id": job_id},
     )
 
-    # Payment UX: persist session id immediately so results can show "pending"
     m["stripe_session_id"] = session.get("id")
-    write_manifest(job_id, m)
+    manifest_path(job_id).write_text(json.dumps(m, indent=2), encoding="utf-8")
 
+    log_event("pay_session_created", job_id=job_id, stripe_session_id=session.get("id"))
     return redirect(session.url, code=303)
 
 
@@ -1055,46 +1105,46 @@ def success():
     if not job_id or not session_id:
         abort(400)
 
-    # Convenience confirmation; webhook is the source of truth once enabled.
     sess = stripe.checkout.Session.retrieve(session_id)
     if sess.payment_status == "paid" and (sess.metadata or {}).get("job_id") == job_id:
         mark_paid(job_id, session_id=session_id)
+        log_event("success_confirmed_paid", job_id=job_id, stripe_session_id=session_id)
         return render_template_string(SUCCESS_HTML, job_id=job_id)
 
+    log_event("success_not_confirmed", job_id=job_id, stripe_session_id=session_id, payment_status=getattr(sess, "payment_status", None))
     return "Payment not confirmed.", 402
 
 
 @app.get("/cancel")
 def cancel():
     job_id = (request.args.get("job_id") or "").strip()
+    log_event("payment_canceled", job_id=job_id)
     return render_template_string(CANCEL_HTML, job_id=job_id)
 
 
-# ============================
-# STRIPE WEBHOOK
-# ============================
 @app.post("/stripe/webhook")
 def stripe_webhook():
     if not STRIPE_WEBHOOK_SECRET:
+        log_event("webhook_missing_secret")
         return ("Webhook secret not configured", 400)
 
     payload = request.get_data(as_text=False)
     sig_header = request.headers.get("Stripe-Signature", "")
 
     try:
-        event = stripe.Webhook.construct_event(
-            payload=payload,
-            sig_header=sig_header,
-            secret=STRIPE_WEBHOOK_SECRET,
-        )
+        event = stripe.Webhook.construct_event(payload=payload, sig_header=sig_header, secret=STRIPE_WEBHOOK_SECRET)
     except ValueError:
+        log_event("webhook_invalid_payload")
         return ("Invalid payload", 400)
     except stripe.error.SignatureVerificationError:
+        log_event("webhook_invalid_signature")
         return ("Invalid signature", 400)
 
     event_id = event.get("id")
+    event_type = event.get("type")
+    log_event("webhook_received", stripe_event_id=event_id, stripe_event_type=event_type)
 
-    if event["type"] == "checkout.session.completed":
+    if event_type == "checkout.session.completed":
         session = event["data"]["object"]
         metadata = session.get("metadata") or {}
         job_id = metadata.get("job_id")
@@ -1103,8 +1153,10 @@ def stripe_webhook():
         if job_id:
             m = read_manifest(job_id)
             if m.get("stripe_event_id") == event_id:
+                log_event("webhook_duplicate_ignored", job_id=job_id, stripe_event_id=event_id)
                 return ("ok", 200)
             mark_paid(job_id, session_id=session_id, event_id=event_id)
+            log_event("webhook_marked_paid", job_id=job_id, stripe_session_id=session_id, stripe_event_id=event_id)
 
     return ("ok", 200)
 
