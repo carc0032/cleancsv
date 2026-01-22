@@ -831,6 +831,209 @@ def is_payment_pending(m: dict) -> bool:
 # ============================
 # Routes continued
 # ============================
+
+@app.get("/")
+def index():
+    cleanup_old_files()
+    log_event("page_view_home", payments_enabled=PAYMENTS_ENABLED)
+    return render_template_string(
+        INDEX_HTML,
+        error=None,
+        max_mb=MAX_BYTES // (1024 * 1024),
+        retention=RETENTION_MINUTES,
+        payments_enabled=PAYMENTS_ENABLED,
+        max_rows=MAX_ROWS,
+        max_cols=MAX_COLS,
+        support_email=SUPPORT_EMAIL,
+    )
+
+
+@app.post("/upload")
+def upload():
+    cleanup_old_files()
+
+    if bytes_too_large(request):
+        log_event("upload_rejected_file_too_large", file_bytes=request.content_length)
+        return render_template_string(
+            INDEX_HTML,
+            error=f"File too large. Max is {MAX_BYTES // (1024 * 1024)} MB.",
+            max_mb=MAX_BYTES // (1024 * 1024),
+            retention=RETENTION_MINUTES,
+            payments_enabled=PAYMENTS_ENABLED,
+            max_rows=MAX_ROWS,
+            max_cols=MAX_COLS,
+            support_email=SUPPORT_EMAIL,
+        ), 413
+
+    ip = get_client_ip()
+    if not rate_limit_check(ip):
+        log_event("upload_rate_limited")
+        return render_template_string(
+            INDEX_HTML,
+            error=f"Rate limit: too many uploads. Please wait {RATE_WINDOW_SECONDS} seconds and try again.",
+            max_mb=MAX_BYTES // (1024 * 1024),
+            retention=RETENTION_MINUTES,
+            payments_enabled=PAYMENTS_ENABLED,
+            max_rows=MAX_ROWS,
+            max_cols=MAX_COLS,
+            support_email=SUPPORT_EMAIL,
+        ), 429
+
+    f = request.files.get("file")
+    if not f or not f.filename:
+        log_event("upload_missing_file")
+        abort(400)
+
+    original_filename = f.filename
+    if not looks_like_csv_name(original_filename):
+        log_event("upload_rejected_extension", filename=original_filename)
+        return render_template_string(
+            INDEX_HTML,
+            error="Please upload a .csv or .tsv file (a .txt export is also OK).",
+            max_mb=MAX_BYTES // (1024 * 1024),
+            retention=RETENTION_MINUTES,
+            payments_enabled=PAYMENTS_ENABLED,
+            max_rows=MAX_ROWS,
+            max_cols=MAX_COLS,
+            support_email=SUPPORT_EMAIL,
+        ), 400
+
+    near_preview = bool(request.form.get("near_dupes_preview"))
+    near_remove = bool(request.form.get("near_dupes_remove"))
+    if near_remove:
+        near_preview = True
+
+    job_id = uuid.uuid4().hex
+    rp = raw_path(job_id)
+    np = norm_path(job_id)
+    op = out_path(job_id)
+
+    log_event(
+        "upload_start",
+        job_id=job_id,
+        filename=original_filename,
+        file_bytes=request.content_length,
+        near_preview=near_preview,
+        near_remove=near_remove,
+    )
+
+    f.save(rp)
+
+    if not looks_like_text_file(rp):
+        log_event("upload_rejected_binary", job_id=job_id)
+        rp.unlink(missing_ok=True)
+        return render_template_string(
+            INDEX_HTML,
+            error="That file doesn't look like a text CSV/TSV (binary data detected).",
+            max_mb=MAX_BYTES // (1024 * 1024),
+            retention=RETENTION_MINUTES,
+            payments_enabled=PAYMENTS_ENABLED,
+            max_rows=MAX_ROWS,
+            max_cols=MAX_COLS,
+            support_email=SUPPORT_EMAIL,
+        ), 400
+
+    parse_path, structural_log = normalize_line_endings_to_lf(rp, np)
+    delim, delim_log = detect_delimiter(parse_path)
+
+    try:
+        df, import_log, import_warning, repaired_indices = read_csv_lenient(parse_path, delimiter=delim)
+    except ValueError as e:
+        log_event("upload_rejected_limits_or_parse", job_id=job_id, error=str(e), delimiter=delim)
+        rp.unlink(missing_ok=True)
+        np.unlink(missing_ok=True)
+        return render_template_string(
+            INDEX_HTML,
+            error=str(e),
+            max_mb=MAX_BYTES // (1024 * 1024),
+            retention=RETENTION_MINUTES,
+            payments_enabled=PAYMENTS_ENABLED,
+            max_rows=MAX_ROWS,
+            max_cols=MAX_COLS,
+            support_email=SUPPORT_EMAIL,
+        ), 400
+
+    df2, clean_log = clean_csv(df)
+    changelog = structural_log + delim_log + import_log + clean_log
+
+    near_dupes_mode = ""
+    ignored_cols: list[str] = []
+    near_dupes_count = 0
+    near_dupe_examples_rows: list[dict] = []
+    near_dupe_examples_tables: list[str] = []
+
+    if near_preview:
+        ignored_cols, near_dupes_count, near_dupe_examples_rows, dup_mask = analyze_near_duplicates(df2, max_examples=5)
+
+        if near_dupes_count == 0:
+            near_dupes_mode = "remove" if near_remove else "preview"
+            changelog.append("No near-duplicate rows found (using the near-duplicate rules).")
+        else:
+            if near_remove:
+                df2 = df2.loc[~dup_mask].copy()
+                near_dupes_mode = "remove"
+                changelog.append(f"Removed {near_dupes_count:,} near-duplicate rows.")
+            else:
+                near_dupes_mode = "preview"
+                changelog.append(f"Dry run: {near_dupes_count:,} near-duplicate rows would be removed.")
+
+        changelog.append(
+            "Near-duplicate rule: compare all columns except "
+            + (", ".join(ignored_cols) if ignored_cols else "(none)")
+            + "."
+        )
+        near_dupe_examples_tables = [render_near_dupe_compare_table(ex, near_dupes_mode) for ex in near_dupe_examples_rows]
+
+    df2.to_csv(op, index=False, encoding="utf-8", lineterminator="\n", sep=delim)
+    changelog.append(f"Wrote output as UTF-8 with standard newlines using delimiter {repr(delim)}.")
+    np.unlink(missing_ok=True)
+
+    rows, cols = int(df2.shape[0]), int(df2.shape[1])
+    preview_first, preview_last, preview_repaired = build_previews(df2, repaired_indices)
+
+    write_manifest(
+        job_id,
+        {
+            "paid": False,
+            "rows": rows,
+            "cols": cols,
+            "changelog": changelog,
+            "import_warning": import_warning,
+            "repaired_row_indices": repaired_indices,
+            "near_dupes_mode": near_dupes_mode,
+            "ignored_cols": ignored_cols,
+            "near_dupes_count": near_dupes_count,
+            "near_dupe_examples_rows": near_dupe_examples_rows,
+            "detected_delimiter": delim,
+            "original_file": rp.name,
+            "original_filename": original_filename or "original.csv",
+        },
+    )
+
+    log_event("upload_complete", job_id=job_id, delimiter=delim, rows=rows, cols=cols, near_dupes_mode=near_dupes_mode)
+
+    return render_template_string(
+        RESULT_HTML,
+        job_id=job_id,
+        rows=rows,
+        cols=cols,
+        changelog=changelog,
+        import_warning=import_warning,
+        near_dupes_mode=near_dupes_mode,
+        ignored_cols=ignored_cols,
+        near_dupe_examples=near_dupe_examples_tables,
+        preview_first=preview_first,
+        preview_last=preview_last,
+        preview_repaired=preview_repaired,
+        retention=RETENTION_MINUTES,
+        paid=False,
+        payments_enabled=PAYMENTS_ENABLED,
+        detected_delimiter=delim,
+        detected_delimiter_label=delimiter_label(delim),
+        payment_pending=False,
+        support_email=SUPPORT_EMAIL,
+    )
+
 @app.get("/download_original/<job_id>")
 def download_original(job_id: str):
     cleanup_old_files()
@@ -925,6 +1128,7 @@ def success():
 
     log_event("success_not_confirmed", job_id=job_id, stripe_session_id=session_id, payment_status=getattr(sess, "payment_status", None))
     return "Payment not confirmed.", 402
+
 @app.get("/result/<job_id>")
 def result(job_id: str):
     cleanup_old_files()
