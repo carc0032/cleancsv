@@ -1020,46 +1020,35 @@ RESULT_HTML = """
 
     <div class="card">
       <p style="margin:0;">
-        <strong>Rows:</strong> {{ rows }} &nbsp;
-        <strong>Columns:</strong> {{ cols }}
+        <strong>Records:</strong> {{ rows }}
+        <span class="muted">(header excluded)</span>
+        &nbsp; <strong>Columns:</strong> {{ cols }}
       </p>
+    </div>
 
       <p class="muted" style="margin-top:10px;">
         Summary of validation and repair steps:
       </p>
 
-      <!-- Repairs applied -->
-      <p class="subhead">Repairs applied</p>
-      <ul class="change-log">
-        {% for item in changelog %}
-          {% if "Fixed" in item
-             or "Removed" in item
-             or "Stitched" in item
-             or "Normalized" in item
-             or "Header detected" in item
-             or "Quote stitching" in item
-             or "Converted to UTF-8" in item %}
-            <li class="change-fix">{{ item }}</li>
-          {% endif %}
-        {% endfor %}
-      </ul>
+<!-- Repairs applied -->
+{% if repairs_applied %}
+  <p class="subhead">Repairs applied</p>
+  <ul class="change-log">
+    {% for item in repairs_applied %}
+      <li class="change-fix">{{ item }}</li>
+    {% endfor %}
+  </ul>
+{% endif %}
 
-      <!-- Checks passed -->
-      <p class="subhead">Checks passed</p>
-      <ul class="change-log">
-        {% for item in changelog %}
-          {% if not (
-             "Fixed" in item
-             or "Removed" in item
-             or "Stitched" in item
-             or "Normalized" in item
-             or "Header detected" in item
-             or "Quote stitching" in item
-             or "Converted to UTF-8" in item ) %}
-            <li class="change-ok">{{ item }}</li>
-          {% endif %}
-        {% endfor %}
-      </ul>
+<!-- Checks passed -->
+{% if checks_passed %}
+  <p class="subhead" style="margin-top:16px;">Checks passed</p>
+  <ul class="change-log">
+    {% for item in checks_passed %}
+      <li class="change-ok">{{ item }}</li>
+    {% endfor %}
+  </ul>
+{% endif %}
 
       <div style="margin-top:16px;">
         <a class="btn" href="/download/{{ job_id }}">
@@ -1402,6 +1391,73 @@ def normalize_to_utf8_lf(src: Path, dst: Path) -> tuple[Path, list[str], str, di
 # ============================
 _CANDIDATE_DELIMS = [",", ";", "\t", "|"]
 
+
+def looks_like_header_row(fields: list[str]) -> bool:
+    """
+    Returns True if the row looks like a header (labels), False if it looks like data.
+    More conservative: strong data signals override label-like tokens.
+    """
+    import re
+
+    if not fields:
+        return False
+
+    # Normalize
+    parts = [(f or "").strip().strip('"').strip() for f in fields]
+    parts = [p for p in parts if p != ""]
+    if not parts:
+        return False
+
+    # Strong "this is data" signals
+    first = parts[0]
+
+    # If first column is a long integer (incident id), it's almost certainly data
+    if re.fullmatch(r"\d{6,}", first):
+        return False
+
+    # If any cell contains an email, it's data (headers basically never do)
+    if any("@" in p for p in parts):
+        return False
+
+    # If average token length is very large, it tends to be data payload, not column names
+    avg_len = sum(len(p) for p in parts) / len(parts)
+    if avg_len > 24:
+        return False
+
+    numeric_like = 0
+    date_like = 0
+    id_like = 0
+    label_like = 0
+
+    for t in parts:
+        # numbers
+        if re.fullmatch(r"[-+]?\d+(\.\d+)?", t):
+            numeric_like += 1
+            continue
+
+        # date/time-ish patterns (common in data rows)
+        if re.match(r"^\d{1,2}/\d{1,2}/\d{2,4}", t) or re.match(r"^\d{8}(_\d{6})?$", t):
+            date_like += 1
+            continue
+
+        # unit/id-like values (R17, E10, etc.)
+        if re.fullmatch(r"[A-Za-z]\d{1,3}", t) or re.fullmatch(r"[Rr]\d{1,3}", t):
+            id_like += 1
+            continue
+
+        # header-ish labels: short-ish snake_case / lowercase tokens
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", t) and ("_" in t or t.islower()) and len(t) <= 24:
+            label_like += 1
+            continue
+
+    n = max(1, len(parts))
+    data_score = (numeric_like + date_like + id_like) / n
+    header_score = label_like / n
+
+    # Header rows tend to be mostly labels, not mostly ids/dates/numbers
+    return header_score >= 0.60 and data_score <= 0.30
+
+
 def detect_and_strip_preamble(
     text: str,
     delimiter: str,
@@ -1443,22 +1499,23 @@ def detect_and_strip_preamble(
     counts_only = [c for _, c in field_counts]
     modal_fields = Counter(counts_only).most_common(1)[0][0]
 
+    # Candidate rows matching modal field count
     candidates = [(i, lines[i]) for i, c in field_counts if c == modal_fields]
     if not candidates:
         log.append("Header detection: no lines match modal field count.")
         return text, log, {}
-    # Always include the first non-empty line as a candidate,
-    # even if it does not match the modal field count
+
+    # Always include the first non-empty line as a candidate, even if it doesn't match modal count
     first_non_empty = next((i for i, ln in enumerate(lines) if ln.strip()), None)
     if first_non_empty is not None and all(i != first_non_empty for i, _ in candidates):
         candidates.append((first_non_empty, lines[first_non_empty]))
 
-    # Sort candidates by line index to keep selection stable
+    # Stable ordering by line number
     candidates.sort(key=lambda x: x[0])
+
     import re
 
     def score_header_line(line: str) -> float:
-        # quote-aware tokenization
         try:
             parts = next(csv.reader([line], delimiter=delimiter))
         except Exception:
@@ -1481,6 +1538,7 @@ def detect_and_strip_preamble(
         score += uniq_ratio * 2.0
         score -= avg_len * 0.05
 
+        # Downrank report titles like "Report: ..."
         if ":" in line and n <= 2:
             score -= 3.0
 
@@ -1491,10 +1549,41 @@ def detect_and_strip_preamble(
 
     best_i, best_score = scored[0]
     second_score = scored[1][1] if len(scored) > 1 else float("-inf")
-    score_gap = best_score - second_score
 
+    # Tie-break / stability
+    TIE_EPS = 0.10
+    top_score = best_score
+    tie_floor = top_score - TIE_EPS
+
+    # Candidates in the near-top "tie" group
+    near_top = [(i, s) for i, s in scored if s >= tie_floor]
+
+    # Default gap (best vs runner-up)
+    score_gap = top_score - second_score
+
+    tie_break_used = False
+    if len(scored) > 1 and score_gap <= TIE_EPS and near_top:
+        PREFER_WITHIN = 10  # prefer a header near the top of the file
+        near_top_early = [(i, s) for i, s in near_top if i < PREFER_WITHIN]
+
+        if near_top_early:
+            best_i, best_score = min(near_top_early, key=lambda x: x[0])
+        else:
+            # Fall back to true top-scoring candidate
+            best_i, best_score = scored[0]
+
+        # Recompute confidence gap: top tier vs best outside tie tier
+        outside = [s for i, s in scored if s < tie_floor]
+        best_outside = max(outside) if outside else float("-inf")
+        score_gap = (top_score - best_outside) if best_outside != float("-inf") else top_score
+
+        tie_break_used = True
+
+    # Logging (always)
     top3 = scored[:3]
     log.append("Header candidates (top 3): " + ", ".join([f"line {i+1} score={s:.2f}" for i, s in top3]))
+    if tie_break_used:
+        log.append(f"Header chosen after tie-break: line {best_i+1}")
     log.append(f"Header selected: line {best_i+1} (score={best_score:.2f})")
     log.append(f"Header score gap: {score_gap:.2f}")
     log.append(f"Header modal field count: {modal_fields}")
@@ -1502,14 +1591,29 @@ def detect_and_strip_preamble(
     MIN_GAP = 0.75
     MAX_PREAMBLE = 15
 
+    # Never strip insane amounts
     if best_i > MAX_PREAMBLE:
         log.append(f"Header detection: candidate too deep (>{MAX_PREAMBLE}); leaving file unchanged.")
-        return text, log, {"header_line_index": 0, "delimiter": delimiter, "column_count": modal_fields, "confidence_score": round(best_score, 2), "score_gap": round(score_gap, 2)}
+        return text, log, {
+            "header_line_index": 0,
+            "delimiter": delimiter,
+            "column_count": modal_fields,
+            "confidence_score": round(best_score, 2),
+            "score_gap": round(score_gap, 2),
+        }
 
+    # Only block stripping when we'd actually strip
     if best_i > 0 and score_gap < MIN_GAP:
-        log.append("Header detection: low confidence (small score gap); leaving file unchanged.")
-        return text, log, {"header_line_index": best_i, "delimiter": delimiter, "column_count": modal_fields, "confidence_score": round(best_score, 2), "score_gap": round(score_gap, 2)}
+        log.append("Header check: no preamble removed.")
+        return text, log, {
+            "header_line_index": best_i,
+            "delimiter": delimiter,
+            "column_count": modal_fields,
+            "confidence_score": round(best_score, 2),
+            "score_gap": round(score_gap, 2),
+        }
 
+    # Apply stripping (or no-op)
     if best_i > 0:
         log.append(f"Header detected on line {best_i+1}; removed {best_i} preamble line(s).")
     else:
@@ -1527,7 +1631,11 @@ def detect_and_strip_preamble(
 
     return cleaned_text, log, header_info
 
+
 def detect_delimiter(path: Path) -> tuple[str, list[str]]:
+    """
+    Legacy delimiter detection. Keep for reference, but prefer guess_delimiter_euro_aware().
+    """
     log: list[str] = []
     sample = path.read_text(encoding="utf-8")[:8192]
     lines = [ln for ln in sample.splitlines() if ln.strip()][:20]
@@ -1622,6 +1730,7 @@ def read_csv_lenient(path: Path, delimiter: str) -> tuple[pd.DataFrame, list[str
     df = pd.DataFrame(cleaned_rows[1:], columns=cleaned_rows[0])
     return df, import_log, import_warning, repaired_indices
 
+
 def guess_delimiter_euro_aware(path: Path, candidates: list[str] | None = None) -> tuple[str, list[str]]:
     """
     Improved delimiter detection:
@@ -1649,18 +1758,14 @@ def guess_delimiter_euro_aware(path: Path, candidates: list[str] | None = None) 
     except Exception:
         pass
 
-    # Helper: measure how consistent delimiter count is across lines
     def consistency_score(delim: str) -> float:
         counts = [ln.count(delim) for ln in lines]
         if not counts:
             return -1.0
         avg = sum(counts) / len(counts)
         var = sum((c - avg) ** 2 for c in counts) / len(counts)
-        # prefer more separators, but penalize inconsistency
         return avg - (var ** 0.5)
 
-    # Helper: detect decimal-comma numbers in tokens
-    # Examples: 12,34  1.234,56  -12,34  (12,34)
     dec_comma_re = re.compile(r"^\(?-?\d{1,3}([.\s]\d{3})*,\d+\)?$")
 
     def decimal_comma_density(delim: str) -> float:
@@ -1676,13 +1781,11 @@ def guess_delimiter_euro_aware(path: Path, candidates: list[str] | None = None) 
     scores = {d: consistency_score(d) for d in candidates}
     best = max(scores, key=scores.get)
 
-    # 2) Euro-aware tie breaker between ',' and ';'
-    # If ';' is close to ',' and decimal-comma tokens are common, prefer ';'
     if "," in scores and ";" in scores:
-        euro_density_comma_split = decimal_comma_density(";")  # tokenizing by ';' shows decimal commas inside fields
-        close = abs(scores[";"] - scores[","]) <= 0.35  # heuristic closeness threshold
-        if close and euro_density_comma_split >= 0.06:  # 6%+ of tokens look like decimal-comma numbers
-            log.append(f"Detected delimiter: ';' (euro-aware: decimal comma density {euro_density_comma_split:.1%}).")
+        euro_density = decimal_comma_density(";")
+        close = abs(scores[";"] - scores[","]) <= 0.35
+        if close and euro_density >= 0.06:
+            log.append(f"Detected delimiter: ';' (euro-aware: decimal comma density {euro_density:.1%}).")
             return ";", log
 
     log.append(f"Detected delimiter: {repr(best)} (heuristic).")
@@ -2082,9 +2185,9 @@ def upload():
     near_remove = bool(request.form.get("near_dupes_remove"))
     if near_remove:
         near_preview = True
-        
+
     normalize_numbers = bool(request.form.get("normalize_numbers"))
-    
+
     job_id = uuid.uuid4().hex
     rp = raw_path(job_id)
     np = norm_path(job_id)
@@ -2116,49 +2219,87 @@ def upload():
             support_email=SUPPORT_EMAIL,
         ), 400
 
-    # Decode + normalize to UTF-8 + quote stitching
+    # Decode + normalize to UTF-8 + newline normalization + quote stitching
     parse_path, structural_log, encoding_used, stitch_stats = normalize_to_utf8_lf(rp, np)
-
     log_event("upload_decoded", job_id=job_id, encoding=encoding_used, **stitch_stats)
 
     # Detect delimiter (EU-aware)
     delim, delim_log = guess_delimiter_euro_aware(parse_path)
 
-    # Header detection operates on TEXT, not Path
+    # Header detection (text-based)
     text = parse_path.read_text(encoding="utf-8")
     text, header_log, header_info = detect_and_strip_preamble(text, delimiter=delim)
     parse_path.write_text(text, encoding="utf-8", newline="\n")
 
-    # Split header log into user-facing vs diagnostics
+    # Split header log into user-facing vs debug (keep debug out of UI)
     DEBUG_PREFIXES = (
         "Header candidates",
         "Header selected",
         "Header score gap",
         "Header modal field count",
+        "Header chosen after tie-break",
     )
     header_user_log = [x for x in header_log if not x.startswith(DEBUG_PREFIXES)]
     header_debug_log = [x for x in header_log if x.startswith(DEBUG_PREFIXES)]
 
-    # Log header detection (full detail goes to server logs)
-    log_event("header_detection", job_id=job_id, note="; ".join(header_log) if header_log else "")
+    
+    # log only the user-facing decision line in prod; keep full debug in debug mode
+    debug = os.environ.get("FLASK_DEBUG", "").lower() in {"1", "true", "yes"}
+    note = "; ".join(header_log) if debug else ("; ".join(header_user_log) if header_user_log else "")
+    log_event("header_detection", job_id=job_id, note=note)
 
-    # Lenient parse (pads/truncates rows)
-    try:
-        df, import_log, import_warning, repaired_indices = read_csv_lenient(parse_path, delimiter=delim)
-    except ValueError as e:
-        log_event("upload_rejected_limits_or_parse", job_id=job_id, error=str(e), delimiter=delim)
-        rp.unlink(missing_ok=True)
-        np.unlink(missing_ok=True)
-        return render_template_string(
-            INDEX_HTML,
-            error=str(e),
-            max_mb=MAX_BYTES // (1024 * 1024),
-            retention=RETENTION_MINUTES,
-            payments_enabled=PAYMENTS_ENABLED,
-            max_rows=MAX_ROWS,
-            max_cols=MAX_COLS,
-            support_email=SUPPORT_EMAIL,
-        ), 400
+    # Headerless CSV handling (safe):
+    # Never synthesize if header detection selected line 1.
+    file_lines = parse_path.read_text(encoding="utf-8").splitlines()
+
+    # If header detection says header is already first line, do not synthesize.
+    if header_info and header_info.get("header_line_index") == 0:
+        pass
+    else:
+        if len(file_lines) >= 2:
+            line1 = file_lines[0]
+            line2 = file_lines[1]
+
+            try:
+                row1 = next(csv.reader([line1], delimiter=delim))
+            except Exception:
+                row1 = line1.split(delim)
+
+            try:
+                row2 = next(csv.reader([line2], delimiter=delim))
+            except Exception:
+                row2 = line2.split(delim)
+
+            row1_fields = [x.strip() for x in row1]
+            row2_fields = [x.strip() for x in row2]
+
+            row1_is_header = looks_like_header_row(row1_fields)
+            row2_is_header = looks_like_header_row(row2_fields)
+
+            # Only synthesize when BOTH first rows look like data
+            if (not row1_is_header) and (not row2_is_header):
+                cols = [f"col_{i+1}" for i in range(len(row1_fields))]
+                new_text = delim.join(cols) + "\n" + "\n".join(file_lines) + "\n"
+                parse_path.write_text(new_text, encoding="utf-8", newline="\n")
+
+                structural_log.append("Header missing: generated a synthetic header row (col_1, col_2, …).")
+                log_event("header_missing_synthesized", job_id=job_id, column_count=len(row1_fields))
+
+        elif len(file_lines) == 1:
+            line1 = file_lines[0]
+            try:
+                row1 = next(csv.reader([line1], delimiter=delim))
+            except Exception:
+                row1 = line1.split(delim)
+
+            row1_fields = [x.strip() for x in row1]
+            if not looks_like_header_row(row1_fields):
+                cols = [f"col_{i+1}" for i in range(len(row1_fields))]
+                new_text = delim.join(cols) + "\n" + line1 + "\n"
+                parse_path.write_text(new_text, encoding="utf-8", newline="\n")
+
+                structural_log.append("Header missing: generated a synthetic header row (col_1, col_2, …).")
+                log_event("header_missing_synthesized", job_id=job_id, column_count=len(row1_fields))
 
     # Lenient parse (pads/truncates rows)
     try:
@@ -2180,24 +2321,49 @@ def upload():
 
     # Clean
     df2, clean_log = clean_csv(df)
-    
+
+    # Optional numeric normalization
     if normalize_numbers:
         df2, num_log = normalize_numeric_strings_df(df2)
         clean_log += num_log
         log_event("numeric_normalization", job_id=job_id, notes=num_log)
+
+    # Build user-facing changelog (no header debug spam)
+    changelog = structural_log + delim_log + header_user_log + import_log + clean_log
     
-    DEBUG_PREFIXES = (
-        "Header candidates",
-        "Header selected",
-        "Header score gap",
-        "Header modal field count",
+    # --- Split changelog into repairs vs checks (user-facing) ---
+    REPAIR_PREFIXES = (
+        "Fixed ",
+        "Removed ",
+        "Header missing",
+        "Header detected",
+        "generated a synthetic header",
+        "Normalized ",
+        "Detected encoding",
+        "Converted to UTF-8",
     )
 
-    header_user_log = [x for x in header_log if not x.startswith(DEBUG_PREFIXES)]
-    header_debug_log = [x for x in header_log if x.startswith(DEBUG_PREFIXES)]
+    repairs_applied = []
+    checks_passed = []
 
-    changelog = structural_log + delim_log + header_user_log + import_log + clean_log
+    for item in changelog:
+        s = item.strip()
 
+        is_repair = (
+            s.startswith("Fixed ")
+            or s.startswith("Removed ")
+            or s.startswith("Normalized ")
+            or s.startswith("Header missing")
+            or s.startswith("Header detected")
+            or "Converted to UTF-8" in s
+            or "Quote stitching: merged" in s
+        )
+
+        if is_repair:
+            repairs_applied.append(item)
+        else:
+            checks_passed.append(item)
+            
     # Near-dupes (optional)
     near_dupes_mode = ""
     ignored_cols: list[str] = []
@@ -2225,7 +2391,10 @@ def upload():
             + (", ".join(ignored_cols) if ignored_cols else "(none)")
             + "."
         )
-        near_dupe_examples_tables = [render_near_dupe_compare_table(ex, near_dupes_mode) for ex in near_dupe_examples_rows]
+
+        near_dupe_examples_tables = [
+            render_near_dupe_compare_table(ex, near_dupes_mode) for ex in near_dupe_examples_rows
+        ]
 
     # Write output
     df2.to_csv(op, index=False, encoding="utf-8", lineterminator="\n", sep=delim)
@@ -2251,6 +2420,8 @@ def upload():
             "detected_delimiter": delim,
             "original_file": rp.name,
             "original_filename": original_filename or "original.csv",
+            # optional: keep header debug around for future diagnostics UI
+            "header_debug_log": header_debug_log,
         },
     )
 
@@ -2261,7 +2432,8 @@ def upload():
         job_id=job_id,
         rows=rows,
         cols=cols,
-        changelog=changelog,
+        repairs_applied=repairs_applied,
+        checks_passed=checks_passed,
         import_warning=import_warning,
         near_dupes_mode=near_dupes_mode,
         ignored_cols=ignored_cols,
