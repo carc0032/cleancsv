@@ -90,139 +90,261 @@ INDEX_HTML = """
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>CleanCSV — Fix broken CSV imports</title>
+  <title>CleanCSV — Repair malformed CSV files</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background: #fff; color: #111; }
-    .wrap { max-width: 960px; margin: 0 auto; padding: 48px 20px 28px; }
-    .hero { display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 24px; align-items: start; }
-    @media (max-width: 900px) { .hero { grid-template-columns: 1fr; } }
-    h1 { font-size: 44px; line-height: 1.05; margin: 0 0 12px; letter-spacing: -0.02em; }
-    .sub { color: #555; font-size: 16px; margin: 0 0 18px; line-height: 1.5; }
-    .bullets { margin: 18px 0 0; padding-left: 18px; color: #333; }
-    .bullets li { margin: 10px 0; }
-    .card { border: 1px solid #e5e7eb; border-radius: 14px; padding: 18px; background: #fff; box-shadow: 0 1px 0 rgba(0,0,0,0.03); }
-    .label { font-size: 13px; color: #666; margin: 0 0 8px; }
-    input[type=file] { width: 100%; }
-    .row { margin-top: 14px; }
-    .opt { margin-top: 12px; }
-    .opt .help { font-size: 13px; color: #666; margin: 6px 0 0 22px; line-height: 1.4; }
-    .btn { display: inline-block; padding: 10px 14px; border-radius: 10px; border: 1px solid #111; background: #111; color: #fff; cursor: pointer; text-decoration: none; font-weight: 600; }
-    .muted { color: #666; font-size: 14px; line-height: 1.45; }
-    .error { color: #b00020; white-space: pre-wrap; margin: 12px 0 0; }
-    footer { border-top: 1px solid #f0f0f0; margin-top: 28px; padding-top: 18px; color: #666; font-size: 13px; display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; justify-content: space-between; }
-    .footer-left { display: flex; flex-wrap: wrap; gap: 10px 18px; }
-    .pill { display:inline-block; padding: 4px 10px; border: 1px solid #e5e7eb; border-radius: 999px; font-size: 12px; color: #444; background: #fafafa; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      margin: 0;
+      background: #fff;
+      color: #111;
+    }
+
+    /* Top utility header */
+    .topbar {
+      border-bottom: 1px solid #e5e7eb;
+      padding: 12px 20px;
+      font-size: 14px;
+      background: #fff;
+    }
+    .topbar a {
+      color: #666;
+      text-decoration: none;
+    }
+
+    .wrap {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 20px 24px;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: 1fr 520px;
+      gap: 32px;
+      align-items: start;
+    }
+
+    @media (max-width: 900px) {
+      .hero {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    h1 {
+      font-size: 34px;
+      line-height: 1.15;
+      margin: 0 0 8px;
+      letter-spacing: -0.01em;
+    }
+
+    .sub {
+      color: #555;
+      font-size: 16px;
+      margin: 0 0 14px;
+      line-height: 1.5;
+    }
+
+    .bullets {
+      padding-left: 18px;
+      margin: 0;
+    }
+    .bullets li {
+      margin: 8px 0;
+      font-size: 14px;
+      color: #444;
+    }
+
+    .card {
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      padding: 16px;
+      background: #f9fafb;
+    }
+
+    .label {
+      font-size: 13px;
+      color: #666;
+      margin: 0 0 8px;
+    }
+
+    input[type=file] {
+      width: 100%;
+    }
+
+    .row {
+      margin-top: 14px;
+    }
+
+    .opt {
+      margin-top: 12px;
+    }
+
+    .opt .help {
+      font-size: 13px;
+      color: #666;
+      margin: 6px 0 0 22px;
+      line-height: 1.4;
+    }
+
+    .btn {
+      display: inline-block;
+      padding: 10px 14px;
+      border-radius: 4px;
+      border: 1px solid #374151;
+      background: #374151;
+      color: #fff;
+      cursor: pointer;
+      font-weight: 500;
+    }
+
+    .muted {
+      color: #666;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    .error {
+      color: #b00020;
+      white-space: pre-wrap;
+      margin: 12px 0 0;
+    }
+
+    footer {
+      border-top: 1px solid #f0f0f0;
+      margin-top: 28px;
+      padding-top: 18px;
+      color: #666;
+      font-size: 13px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 18px;
+      justify-content: space-between;
+    }
+
+    .footer-left {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 18px;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 4px 10px;
+      border: 1px solid #e5e7eb;
+      border-radius: 999px;
+      font-size: 12px;
+      color: #444;
+      background: #fafafa;
+    }
   </style>
 </head>
+
 <body>
+
+  <!-- Top utility header -->
+  <div class="topbar">
+    <strong>CleanCSV</strong>
+    <span style="color:#666; margin-left:12px;">CSV repair utility</span>
+    <span style="float:right;">
+      <a href="/problems">Problems</a>
+    </span>
+  </div>
+
   <div class="wrap">
     <div class="hero">
+
+      <!-- Left: context -->
       <div>
-        <h1>Fix CSV files that won’t import.</h1>
+        <h1>Repair malformed CSV files</h1>
+
         <p class="sub">
-          Upload your file → see what was repaired → download a clean version.
-          Built for messy exports: extra columns, missing fields, weird delimiters, embedded newlines.
+          Fix delimiter, encoding, and row-structure issues so CSV files import correctly.
           <br />
-          <b>Handles European CSVs automatically (semicolon delimiters, decimal commas, localized number formats).</b>
+          <strong>Handles European CSVs automatically</strong> (semicolon delimiters, decimal commas, localized number formats).
         </p>
+
         <ul class="bullets">
-          <li><b>Repairs inconsistent rows</b> (extra/missing columns) and keeps the file importable.</li>
-          <li><b>Detects delimiter</b> (CSV / TSV / semicolon / pipe) automatically.</li>
-          <li><b>Stitches quoted multiline records</b> (newlines inside "quoted" fields).</li>
+          <li>Strict row normalization (every row matches the header)</li>
+          <li>Explicit delimiter detection (comma, semicolon, tab, pipe)</li>
+          <li>RFC-style handling of quoted multiline fields</li>
         </ul>
-    <div class="card" style="margin-top:20px; background:#fafafa;">
-        <p class="label"><b>Example: real-world CSV → cleaned output</b></p>
-
-    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px;">
-    <div>
-      <p class="muted" style="margin:0 0 6px;"><b>Before</b> (breaks imports)</p>
-      <pre style="background:#fff; border:1px solid #e5e7eb; border-radius:8px; padding:10px; font-size:12px; overflow:auto;">
-        Report: Transactions
-        Generated: 2026-01-22
-        id;amount;note
-        1;1.234,56;"Refund
-        processed"
-      </pre>
-    </div>
-
-    <div>
-      <p class="muted" style="margin:0 0 6px;"><b>After</b> (CleanCSV output)</p>
-      <pre style="background:#fff; border:1px solid #e5e7eb; border-radius:8px; padding:10px; font-size:12px; overflow:auto;">
-id,amount,note
-1,1234.56,Refund processed
-      </pre>
-    </div>
-  </div>
-</div>
       </div>
 
+      <!-- Right: tool -->
       <div class="card">
-        <p class="label"><b>Upload a CSV/TSV</b></p>
+        <p class="label"><strong>Process CSV</strong></p>
+
         <form action="/upload" method="post" enctype="multipart/form-data">
-          <input type="file" name="file" required accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values,text/plain" />
+          <input type="file" name="file" required
+                 accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values,text/plain" />
 
           <div class="opt">
             <label>
               <input type="checkbox" name="near_dupes_preview" value="1" />
-              <b>Preview</b> near-duplicates (dry run)
+              Preview near-duplicates (dry run)
             </label>
-            <div class="help">Shows examples and how many rows would be removed, but does not delete anything.</div>
+            <div class="help">Shows what would be removed without modifying the file.</div>
           </div>
 
-                    <div class="opt">
+          <div class="opt">
             <label>
               <input type="checkbox" name="near_dupes_remove" value="1" />
-              <b>Remove</b> near-duplicates
+              Remove near-duplicates
             </label>
-            <div class="help">Removes rows that match after ignoring ID/date/balance-style columns.</div>
+            <div class="help">Removes rows identical after ignoring ID/date/balance fields.</div>
           </div>
 
           <div class="opt">
             <label>
               <input type="checkbox" name="normalize_numbers" value="1" />
-              <b>Normalize numbers</b> (optional)
+              Normalize numbers
             </label>
-            <div class="help">Converts values like 1.234,56 → 1234.56 and (5,00) → -5.00 where safe.</div>
+            <div class="help">Converts values like 1.234,56 → 1234.56 where safe.</div>
           </div>
-        
 
           <div class="row">
-            <button class="btn" type="submit">Upload & preview</button>
+            <button class="btn" type="submit">Process file</button>
           </div>
         </form>
 
+        <p class="muted" style="margin-top:8px;">
+          Output: UTF-8 CSV with normalized structure
+        </p>
+
         {% if error %}
-          <p class="error"><b>Error:</b> {{ error }}</p>
+          <p class="error"><strong>Error:</strong> {{ error }}</p>
         {% endif %}
 
         <div class="row muted">
-          <div class="pill">Max: {{ max_mb }} MB</div>
-          <div class="pill">Deletes in {{ retention }} min</div>
-          <div class="pill">Limits: {{ max_rows }} rows / {{ max_cols }} cols</div>
+          <span class="pill">Max {{ max_mb }} MB</span>
+          <span class="pill">{{ max_rows }} rows / {{ max_cols }} cols</span>
         </div>
 
         <p class="muted" style="margin-top:12px;">
           {% if payments_enabled %}
-            $5 one-time download • You’ll see the preview before paying.
+            Download requires a one-time fee.
           {% else %}
-            Payments disabled (missing Stripe env vars). Downloads are free.
+            Payments disabled. Downloads are free.
           {% endif %}
         </p>
       </div>
+
     </div>
 
     <footer>
-  <div class="footer-left">
-    <span>Files auto-delete after {{ retention }} minutes.</span>
-    <span>Support: {{ support_email }}</span>
-    <span>CSV/TSV only (text files)</span>
-    <span><a href="/problems">Common CSV import problems</a></span>
-  </div>
-  <div>
-    <span class="pill">Secure checkout via Stripe</span>
-  </div>
-</footer>
+      <div class="footer-left">
+        <span>Files are not stored.</span>
+        <span>Support: {{ support_email }}</span>
+        <span>CSV/TSV only</span>
+        <span><a href="/problems">Common CSV import problems</a></span>
+      </div>
+      <div>
+        <span class="pill">Secure checkout via Stripe</span>
+      </div>
+    </footer>
+
   </div>
 </body>
 </html>
@@ -749,7 +871,6 @@ PROBLEMS_INDEX_HTML = """
 </body>
 </html>
 """
-
 RESULT_HTML = """
 <!doctype html>
 <html>
@@ -757,30 +878,128 @@ RESULT_HTML = """
   <meta charset="utf-8" />
   <title>CleanCSV — Results</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background:#fff; color:#111; }
-    .wrap { max-width: 1120px; margin: 0 auto; padding: 32px 20px 28px; }
-    .card { border: 1px solid #e5e7eb; border-radius: 14px; padding: 18px; background: #fff; margin-top: 16px; }
-    .btn { display:inline-block; padding: 10px 14px; border-radius: 10px; border: 1px solid #111; background: #111; color: #fff; text-decoration:none; margin-right:10px; font-weight:600; }
-    .btn.secondary { background:#fff; color:#111; }
-    .muted { color: #666; font-size: 14px; line-height: 1.45; }
-    ul { margin: 8px 0 0 18px; }
-    .pill { display:inline-block; padding:4px 10px; border:1px solid #e5e7eb; border-radius:999px; font-size:12px; color:#444; background:#fafafa; margin-right:8px; }
-    .warn { color:#8a6d3b; }
-    .chip { display:inline-block; padding:4px 10px; border:1px solid #e5e7eb; border-radius:999px; font-size:12px; margin: 4px 6px 0 0; color:#444; background:#fafafa; }
-    .chips { margin-top: 6px; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      margin: 0;
+      background: #fff;
+      color: #111;
+    }
 
-    .table-wrap { overflow-x: auto; width: 100%; border: 1px solid #e5e7eb; border-radius: 10px; padding: 8px; background: #fff; }
-    .table-wrap table { border-collapse: collapse; width: max-content; min-width: 100%; }
-    .table-wrap th, .table-wrap td { border-bottom: 1px solid #eee; padding: 8px; text-align: left; font-size: 13px; white-space: nowrap; }
+    .wrap {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 32px 20px 28px;
+    }
 
-    .subhead { font-weight: 700; margin: 0 0 6px; }
-    .callout { border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px; background: #fafafa; margin-top: 12px; }
+    .card {
+      border: 1px solid #e5e7eb;
+      border-radius: 14px;
+      padding: 18px;
+      background: #fff;
+      margin-top: 16px;
+    }
 
-    footer { border-top: 1px solid #f0f0f0; margin-top: 28px; padding-top: 18px; color: #666; font-size: 13px; display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; justify-content: space-between; }
-    .footer-left { display: flex; flex-wrap: wrap; gap: 10px 18px; }
+    .btn {
+      display: inline-block;
+      padding: 10px 14px;
+      border-radius: 4px;
+      border: 1px solid #374151;
+      background: #374151;
+      color: #fff;
+      text-decoration: none;
+      font-weight: 500;
+    }
+
+    .muted {
+      color: #666;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 4px 10px;
+      border: 1px solid #e5e7eb;
+      border-radius: 999px;
+      font-size: 12px;
+      color: #444;
+      background: #fafafa;
+      margin-right: 8px;
+    }
+
+    .warn {
+      color: #8a6d3b;
+    }
+
+    .subhead {
+      font-weight: 700;
+      margin: 14px 0 6px;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      width: 100%;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      padding: 8px;
+      background: #fff;
+    }
+
+    .table-wrap table {
+      border-collapse: collapse;
+      width: max-content;
+      min-width: 100%;
+    }
+
+    .table-wrap th,
+    .table-wrap td {
+      border-bottom: 1px solid #eee;
+      padding: 8px;
+      text-align: left;
+      font-size: 13px;
+      white-space: nowrap;
+    }
+
+    /* Change log styling */
+    .change-log {
+      margin: 6px 0 0 18px;
+    }
+
+    .change-log li {
+      margin: 6px 0;
+    }
+
+    .change-fix {
+      color: #047857;
+      font-weight: 500;
+    }
+
+    .change-ok {
+      color: #374151;
+    }
+
+    footer {
+      border-top: 1px solid #f0f0f0;
+      margin-top: 28px;
+      padding-top: 18px;
+      color: #666;
+      font-size: 13px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 18px;
+      justify-content: space-between;
+    }
+
+    .footer-left {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 18px;
+    }
   </style>
 </head>
+
 <body>
   <div class="wrap">
     <h1 style="margin:0 0 6px;">Results</h1>
@@ -792,70 +1011,123 @@ RESULT_HTML = """
       {% if near_dupes_mode %}<span class="pill">Near-dupes: {{ near_dupes_mode }}</span>{% endif %}
       {% if detected_delimiter %}<span class="pill">Delimiter: {{ detected_delimiter_label }}</span>{% endif %}
     </p>
-    
+
     <p class="muted" style="margin:0 0 12px;">
       <span class="pill">Encoding: {{ encoding_label }}</span>
       <span class="pill">Numbers: {{ numbers_label }}</span>
       <span class="pill">Header: {{ header_label }}</span>
     </p>
-    
+
     <div class="card">
-      <p style="margin:0;"><b>Rows:</b> {{ rows }} &nbsp; <b>Columns:</b> {{ cols }}</p>
+      <p style="margin:0;">
+        <strong>Rows:</strong> {{ rows }} &nbsp;
+        <strong>Columns:</strong> {{ cols }}
+      </p>
 
-      {% if payment_pending %}
-        <div class="callout">
-          <p class="muted" style="margin:0;"><b>Payment pending.</b> If you just paid, the webhook may take a few seconds. Refresh in ~5 seconds.</p>
-          <p style="margin:10px 0 0;"><a class="btn secondary" href="/result/{{ job_id }}">Refresh status</a></p>
-        </div>
-      {% endif %}
+      <p class="muted" style="margin-top:10px;">
+        Summary of validation and repair steps:
+      </p>
 
-      {% if near_dupes_mode %}
-        <div style="margin-top:14px;">
-          <p class="subhead">Near-duplicate comparison rule</p>
-          <p class="muted" style="margin:0;">We compare all columns <b>except</b> the ones below.</p>
-          <div class="chips">
-            {% for c in ignored_cols %}<span class="chip">{{ c }}</span>{% endfor %}
-            {% if ignored_cols|length == 0 %}<span class="chip">(none)</span>{% endif %}
-          </div>
-        </div>
-      {% endif %}
+      <!-- Repairs applied -->
+      <p class="subhead">Repairs applied</p>
+      <ul class="change-log">
+        {% for item in changelog %}
+          {% if "Fixed" in item
+             or "Removed" in item
+             or "Stitched" in item
+             or "Normalized" in item
+             or "Header detected" in item
+             or "Quote stitching" in item
+             or "Converted to UTF-8" in item %}
+            <li class="change-fix">{{ item }}</li>
+          {% endif %}
+        {% endfor %}
+      </ul>
 
-      <div style="margin-top:14px;">
-        <p class="subhead">What changed</p>
-        <ul class="muted">{% for item in changelog %}<li>{{ item }}</li>{% endfor %}</ul>
-      </div>
+      <!-- Checks passed -->
+      <p class="subhead">Checks passed</p>
+      <ul class="change-log">
+        {% for item in changelog %}
+          {% if not (
+             "Fixed" in item
+             or "Removed" in item
+             or "Stitched" in item
+             or "Normalized" in item
+             or "Header detected" in item
+             or "Quote stitching" in item
+             or "Converted to UTF-8" in item ) %}
+            <li class="change-ok">{{ item }}</li>
+          {% endif %}
+        {% endfor %}
+      </ul>
 
       <div style="margin-top:16px;">
-        <a class="btn" href="/download/{{ job_id }}">{% if paid or not payments_enabled %}Download cleaned file{% else %}Pay $5 & download{% endif %}</a>
-        <a class="btn secondary" href="/download_original/{{ job_id }}">Download original</a>
-        <a class="btn secondary" href="/result/{{ job_id }}">Results link</a>
+        <a class="btn" href="/download/{{ job_id }}">
+          {% if paid or not payments_enabled %}
+            Download cleaned file
+          {% else %}
+            Pay $5 & download
+          {% endif %}
+        </a>
+
+        <p class="muted" style="margin-top:8px;">
+          This file reflects the changes listed above.
+        </p>
       </div>
 
-      <p class="muted" style="margin-top:12px;">$5 one-time download • Files are automatically deleted after {{ retention }} minutes</p>
+      <p class="muted" style="margin-top:12px;">
+        {% if payments_enabled %}
+          $5 one-time download
+        {% else %}
+          Payments disabled. Downloads are free.
+        {% endif %}
+      </p>
     </div>
 
     {% if near_dupe_examples %}
       <div class="card">
         <p class="subhead">Near-duplicate examples</p>
-        <p class="muted" style="margin-top:0;">Each example is shown as two rows in one table. “Kept” is the first occurrence; the other row is {{ "what would be removed" if near_dupes_mode == "preview" else "what was removed" }}.</p>
-        {% for ex in near_dupe_examples %}<div style="margin-top:14px;"><div class="table-wrap">{{ ex|safe }}</div></div>{% endfor %}
+        <p class="muted" style="margin-top:0;">
+          Each example shows two rows. “Kept” is the first occurrence;
+          the other is {{ "what would be removed" if near_dupes_mode == "preview" else "what was removed" }}.
+        </p>
+
+        {% for ex in near_dupe_examples %}
+          <div style="margin-top:14px;">
+            <div class="table-wrap">{{ ex|safe }}</div>
+          </div>
+        {% endfor %}
       </div>
     {% endif %}
 
-    <div class="card"><p class="subhead">Preview: first 10 rows</p><div class="table-wrap">{{ preview_first|safe }}</div></div>
-    <div class="card"><p class="subhead">Preview: last 10 rows</p><div class="table-wrap">{{ preview_last|safe }}</div></div>
+    <div class="card">
+      <p class="subhead">Preview: first 10 rows</p>
+      <div class="table-wrap">{{ preview_first|safe }}</div>
+    </div>
+
+    <div class="card">
+      <p class="subhead">Preview: last 10 rows</p>
+      <div class="table-wrap">{{ preview_last|safe }}</div>
+    </div>
 
     {% if preview_repaired %}
       <div class="card">
         <p class="subhead">Preview: repaired rows (up to 10)</p>
-        <p class="muted" style="margin-top:0;">These rows had the wrong number of columns in the original file and were repaired to match the header.</p>
+        <p class="muted" style="margin-top:0;">
+          These rows had the wrong number of columns and were repaired.
+        </p>
         <div class="table-wrap">{{ preview_repaired|safe }}</div>
       </div>
     {% endif %}
 
     <footer>
-      <div class="footer-left"><span>Files auto-delete after {{ retention }} minutes.</span><span>Support: {{ support_email }}</span></div>
-      <div><span class="pill">Secure checkout via Stripe</span></div>
+      <div class="footer-left">
+        <span>Files are not stored.</span>
+        <span>Support: {{ support_email }}</span>
+      </div>
+      <div>
+        <span class="pill">Secure checkout via Stripe</span>
+      </div>
     </footer>
   </div>
 </body>
@@ -884,7 +1156,7 @@ SUCCESS_HTML = """
     <p><a class="btn" href="/download/{{ job_id }}">Download cleaned file</a></p>
     <p class="muted">Need help? Email {{ support_email }} and include Job ID: {{ job_id }}</p>
     <p class="muted"><a href="/result/{{ job_id }}">Back to results</a></p>
-    <footer>Files auto-delete after {{ retention }} minutes • Support: {{ support_email }}</footer>
+    <footer>Files are not stored • Support: {{ support_email }}</footer>
   </div>
 </body>
 </html>
@@ -1130,6 +1402,123 @@ def normalize_to_utf8_lf(src: Path, dst: Path) -> tuple[Path, list[str], str, di
 # ============================
 _CANDIDATE_DELIMS = [",", ";", "\t", "|"]
 
+def detect_and_strip_preamble(
+    text: str,
+    delimiter: str,
+    max_scan_lines: int = 60
+) -> tuple[str, list[str], dict]:
+    """
+    Quote-aware header detection:
+    - Uses csv.reader to compute field counts (respects quotes)
+    - Finds modal field count among first N lines
+    - Scores candidate header rows
+    - Strips preamble only when confident
+    Returns (cleaned_text, log_lines, header_info)
+    """
+    log: list[str] = []
+    lines = text.splitlines()
+
+    if not lines:
+        log.append("Header detection: empty file.")
+        return text, log, {}
+
+    scan_lines = lines[:max_scan_lines]
+
+    # Quote-aware field count per line
+    field_counts: list[tuple[int, int]] = []  # (line_index, field_count)
+    for i, ln in enumerate(scan_lines):
+        if not ln.strip():
+            continue
+        try:
+            row = next(csv.reader([ln], delimiter=delimiter))
+            field_counts.append((i, len(row)))
+        except Exception:
+            continue
+
+    if not field_counts:
+        log.append("Header detection: no parseable non-empty lines found.")
+        return text, log, {}
+
+    from collections import Counter
+    counts_only = [c for _, c in field_counts]
+    modal_fields = Counter(counts_only).most_common(1)[0][0]
+
+    candidates = [(i, lines[i]) for i, c in field_counts if c == modal_fields]
+    if not candidates:
+        log.append("Header detection: no lines match modal field count.")
+        return text, log, {}
+
+    import re
+
+    def score_header_line(line: str) -> float:
+        # quote-aware tokenization
+        try:
+            parts = next(csv.reader([line], delimiter=delimiter))
+        except Exception:
+            parts = line.split(delimiter)
+
+        parts = [p.strip() for p in parts]
+        n = len(parts) if parts else 1
+
+        alpha_tokens = sum(1 for p in parts if re.search(r"[A-Za-z]", p))
+        numeric_tokens = sum(1 for p in parts if re.fullmatch(r"[-+]?\d+(\.\d+)?", p))
+        date_like = sum(1 for p in parts if re.match(r"\d{4}-\d{2}-\d{2}", p))
+
+        uniq_ratio = len(set(parts)) / n
+        avg_len = sum(len(p) for p in parts) / n
+
+        score = 0.0
+        score += (alpha_tokens / n) * 4.0
+        score -= (numeric_tokens / n) * 5.0
+        score -= (date_like / n) * 4.0
+        score += uniq_ratio * 2.0
+        score -= avg_len * 0.05
+
+        if ":" in line and n <= 2:
+            score -= 3.0
+
+        return score
+
+    scored = [(i, score_header_line(ln)) for i, ln in candidates]
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    best_i, best_score = scored[0]
+    second_score = scored[1][1] if len(scored) > 1 else float("-inf")
+    score_gap = best_score - second_score
+
+    top3 = scored[:3]
+    log.append("Header candidates (top 3): " + ", ".join([f"line {i+1} score={s:.2f}" for i, s in top3]))
+    log.append(f"Header selected: line {best_i+1} (score={best_score:.2f})")
+    log.append(f"Header score gap: {score_gap:.2f}")
+    log.append(f"Header modal field count: {modal_fields}")
+
+    MIN_GAP = 0.75
+    MAX_PREAMBLE = 15
+
+    if best_i > MAX_PREAMBLE:
+        log.append(f"Header detection: candidate too deep (>{MAX_PREAMBLE}); leaving file unchanged.")
+        return text, log, {"header_line_index": 0, "delimiter": delimiter, "column_count": modal_fields, "confidence_score": round(best_score, 2), "score_gap": round(score_gap, 2)}
+
+    if best_i > 0 and score_gap < MIN_GAP:
+        log.append("Header detection: low confidence (small score gap); leaving file unchanged.")
+        return text, log, {"header_line_index": best_i, "delimiter": delimiter, "column_count": modal_fields, "confidence_score": round(best_score, 2), "score_gap": round(score_gap, 2)}
+
+    if best_i > 0:
+        log.append(f"Header detected on line {best_i+1}; removed {best_i} preamble line(s).")
+    else:
+        log.append("Header appears to be on the first line (no preamble removed).")
+
+    cleaned_text = "\n".join(lines[best_i:])
+
+    header_info = {
+        "header_line_index": best_i,
+        "delimiter": delimiter,
+        "column_count": modal_fields,
+        "confidence_score": round(best_score, 2),
+        "score_gap": round(score_gap, 2),
+    }
+
+    return cleaned_text, log, header_info
 
 def detect_delimiter(path: Path) -> tuple[str, list[str]]:
     log: list[str] = []
@@ -1225,81 +1614,6 @@ def read_csv_lenient(path: Path, delimiter: str) -> tuple[pd.DataFrame, list[str
 
     df = pd.DataFrame(cleaned_rows[1:], columns=cleaned_rows[0])
     return df, import_log, import_warning, repaired_indices
-
-def detect_and_strip_preamble(parse_path: Path, delimiter: str, max_scan_lines: int = 60) -> tuple[Path, list[str]]:
-    """
-    Heuristic header detection:
-    - Look at first N lines
-    - Score each line as a candidate header
-    - If a later line looks like the true header, drop preamble lines above it
-    Writes back to parse_path (UTF-8) and returns (parse_path, changelog_lines).
-    """
-    log: list[str] = []
-
-    lines = parse_path.read_text(encoding="utf-8").splitlines()
-    if not lines:
-        return parse_path, log
-
-    scan = lines[: max_scan_lines]
-    # Ignore completely empty lines but keep their indices
-    candidates = [(i, ln) for i, ln in enumerate(scan) if ln.strip()]
-
-    if len(candidates) < 2:
-        return parse_path, log
-
-    def score_header_line(line: str) -> float:
-        # Split by delimiter (not full CSV parsing; just a heuristic)
-        parts = [p.strip() for p in line.split(delimiter)]
-        n = len(parts)
-
-        if n < 2:
-            return -1.0
-
-        # Penalize lines that look like titles (single long field)
-        # Reward lines with many columns, mostly "name-like" tokens, and uniqueness
-        alpha_tokens = sum(1 for p in parts if p and re.search(r"[A-Za-z]", p))
-        numeric_tokens = sum(1 for p in parts if p and re.fullmatch(r"[-+]?(\d+(\.\d+)?)", p))
-        empty_tokens = sum(1 for p in parts if not p)
-
-        uniq_ratio = len(set(parts)) / max(1, n)
-
-        # header-ish: more alpha than numeric, few empties, decent uniqueness, and more columns
-        score = 0.0
-        score += min(10.0, n) * 1.2
-        score += (alpha_tokens / n) * 3.0
-        score -= (numeric_tokens / n) * 2.0
-        score -= (empty_tokens / n) * 2.5
-        score += uniq_ratio * 1.0
-
-        # Downrank lines that contain ':' heavily (often "Report: ...")
-        if ":" in line and n <= 2:
-            score -= 3.0
-
-        return score
-
-    scored = [(i, score_header_line(ln)) for i, ln in candidates]
-    scored.sort(key=lambda t: t[1], reverse=True)
-
-    best_i, best_score = scored[0]
-    if best_score < 2.5:
-        # not confident enough to strip
-        return parse_path, log
-
-    # Only strip if header is not already at top and we are confident
-    if best_i > 0:
-        dropped = best_i
-        new_lines = lines[best_i:]  # keep from header onward
-        # Also drop any leading empty lines after header selection
-        while new_lines and not new_lines[0].strip():
-            new_lines = new_lines[1:]
-            dropped += 1
-
-        parse_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8", newline="\n")
-        log.append(f"Header detected on line {best_i+1}; removed {dropped} preamble line(s).")
-    else:
-        log.append("Header appears to be on the first line (no preamble removed).")
-
-    return parse_path, log
 
 def guess_delimiter_euro_aware(path: Path, candidates: list[str] | None = None) -> tuple[str, list[str]]:
     """
@@ -1797,12 +2111,47 @@ def upload():
 
     # Decode + normalize to UTF-8 + quote stitching
     parse_path, structural_log, encoding_used, stitch_stats = normalize_to_utf8_lf(rp, np)
+
     log_event("upload_decoded", job_id=job_id, encoding=encoding_used, **stitch_stats)
 
-    # Detect delimiter on UTF-8 normalized file
+    # Detect delimiter (EU-aware)
     delim, delim_log = guess_delimiter_euro_aware(parse_path)
-    parse_path, header_log = detect_and_strip_preamble(parse_path, delim)
+
+    # Header detection operates on TEXT, not Path
+    text = parse_path.read_text(encoding="utf-8")
+    text, header_log, header_info = detect_and_strip_preamble(text, delimiter=delim)
+    parse_path.write_text(text, encoding="utf-8", newline="\n")
+
+    # Split header log into user-facing vs diagnostics
+    DEBUG_PREFIXES = (
+        "Header candidates",
+        "Header selected",
+        "Header score gap",
+        "Header modal field count",
+    )
+    header_user_log = [x for x in header_log if not x.startswith(DEBUG_PREFIXES)]
+    header_debug_log = [x for x in header_log if x.startswith(DEBUG_PREFIXES)]
+
+    # Log header detection (full detail goes to server logs)
     log_event("header_detection", job_id=job_id, note="; ".join(header_log) if header_log else "")
+
+    # Lenient parse (pads/truncates rows)
+    try:
+        df, import_log, import_warning, repaired_indices = read_csv_lenient(parse_path, delimiter=delim)
+    except ValueError as e:
+        log_event("upload_rejected_limits_or_parse", job_id=job_id, error=str(e), delimiter=delim)
+        rp.unlink(missing_ok=True)
+        np.unlink(missing_ok=True)
+        return render_template_string(
+            INDEX_HTML,
+            error=str(e),
+            max_mb=MAX_BYTES // (1024 * 1024),
+            retention=RETENTION_MINUTES,
+            payments_enabled=PAYMENTS_ENABLED,
+            max_rows=MAX_ROWS,
+            max_cols=MAX_COLS,
+            support_email=SUPPORT_EMAIL,
+        ), 400
 
     # Lenient parse (pads/truncates rows)
     try:
@@ -1830,7 +2179,17 @@ def upload():
         clean_log += num_log
         log_event("numeric_normalization", job_id=job_id, notes=num_log)
     
-    changelog = structural_log + delim_log + header_log + import_log + clean_log
+    DEBUG_PREFIXES = (
+        "Header candidates",
+        "Header selected",
+        "Header score gap",
+        "Header modal field count",
+    )
+
+    header_user_log = [x for x in header_log if not x.startswith(DEBUG_PREFIXES)]
+    header_debug_log = [x for x in header_log if x.startswith(DEBUG_PREFIXES)]
+
+    changelog = structural_log + delim_log + header_user_log + import_log + clean_log
 
     # Near-dupes (optional)
     near_dupes_mode = ""
