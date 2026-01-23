@@ -1447,7 +1447,14 @@ def detect_and_strip_preamble(
     if not candidates:
         log.append("Header detection: no lines match modal field count.")
         return text, log, {}
+    # Always include the first non-empty line as a candidate,
+    # even if it does not match the modal field count
+    first_non_empty = next((i for i, ln in enumerate(lines) if ln.strip()), None)
+    if first_non_empty is not None and all(i != first_non_empty for i, _ in candidates):
+        candidates.append((first_non_empty, lines[first_non_empty]))
 
+    # Sort candidates by line index to keep selection stable
+    candidates.sort(key=lambda x: x[0])
     import re
 
     def score_header_line(line: str) -> float:
