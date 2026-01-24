@@ -1499,7 +1499,17 @@ def detect_and_strip_preamble(
     counts_only = [c for _, c in field_counts]
     modal_fields = Counter(counts_only).most_common(1)[0][0]
 
-    # Candidate rows matching modal field count
+    # If preamble dominates (modal_fields == 1) but a real table appears later,
+    # prefer the modal among multi-field lines.
+    if modal_fields == 1:
+        multi = [c for c in counts_only if c >= 2]
+        if multi:
+            modal_fields = Counter(multi).most_common(1)[0][0]
+            log.append(
+                f"Header detection: preamble-heavy file; using modal field count {modal_fields} from multi-field lines."
+            )
+
+    # Candidate rows matching modal field count (always do this)
     candidates = [(i, lines[i]) for i, c in field_counts if c == modal_fields]
     if not candidates:
         log.append("Header detection: no lines match modal field count.")
@@ -2221,6 +2231,15 @@ def upload():
 
     # Decode + normalize to UTF-8 + newline normalization + quote stitching
     parse_path, structural_log, encoding_used, stitch_stats = normalize_to_utf8_lf(rp, np)
+    # Classify quote stitching as repair vs check
+    if stitch_stats.get("stitched_records", 0) > 0:
+        structural_log.append(
+            f"Fixed {stitch_stats['stitched_records']} multiline quoted record(s)."
+        )
+    else:
+        structural_log.append(
+            "Quote stitching check: no multiline quoted records found."
+        )
     log_event("upload_decoded", job_id=job_id, encoding=encoding_used, **stitch_stats)
 
     # Detect delimiter (EU-aware)
@@ -2230,7 +2249,14 @@ def upload():
     text = parse_path.read_text(encoding="utf-8")
     text, header_log, header_info = detect_and_strip_preamble(text, delimiter=delim)
     parse_path.write_text(text, encoding="utf-8", newline="\n")
+    
+    header_stripped = any("Header detected on line" in x for x in header_log)
 
+    # After stripping, the header is now at line 1 (index 0) in the rewritten file.
+    if header_stripped and header_info is not None:
+      header_info["header_line_index"] = 0
+  
+    
     # Split header log into user-facing vs debug (keep debug out of UI)
     DEBUG_PREFIXES = (
         "Header candidates",
@@ -2252,10 +2278,12 @@ def upload():
     # Never synthesize if header detection selected line 1.
     file_lines = parse_path.read_text(encoding="utf-8").splitlines()
 
-    # If header detection says header is already first line, do not synthesize.
-    if header_info and header_info.get("header_line_index") == 0:
+    # If we stripped preamble, header is now at top — never synthesize.
+    if header_stripped:
         pass
     else:
+        file_lines = parse_path.read_text(encoding="utf-8").splitlines()
+
         if len(file_lines) >= 2:
             line1 = file_lines[0]
             line2 = file_lines[1]
@@ -2276,16 +2304,16 @@ def upload():
             row1_is_header = looks_like_header_row(row1_fields)
             row2_is_header = looks_like_header_row(row2_fields)
 
-            # Only synthesize when BOTH first rows look like data
+            # Synthesize only when BOTH look like data
             if (not row1_is_header) and (not row2_is_header):
                 cols = [f"col_{i+1}" for i in range(len(row1_fields))]
                 new_text = delim.join(cols) + "\n" + "\n".join(file_lines) + "\n"
                 parse_path.write_text(new_text, encoding="utf-8", newline="\n")
-
                 structural_log.append("Header missing: generated a synthetic header row (col_1, col_2, …).")
                 log_event("header_missing_synthesized", job_id=job_id, column_count=len(row1_fields))
 
         elif len(file_lines) == 1:
+            # Single line: if it doesn't look like a header, synthesize
             line1 = file_lines[0]
             try:
                 row1 = next(csv.reader([line1], delimiter=delim))
@@ -2297,7 +2325,6 @@ def upload():
                 cols = [f"col_{i+1}" for i in range(len(row1_fields))]
                 new_text = delim.join(cols) + "\n" + line1 + "\n"
                 parse_path.write_text(new_text, encoding="utf-8", newline="\n")
-
                 structural_log.append("Header missing: generated a synthetic header row (col_1, col_2, …).")
                 log_event("header_missing_synthesized", job_id=job_id, column_count=len(row1_fields))
 
